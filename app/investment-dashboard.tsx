@@ -1713,6 +1713,7 @@ function DataCenter({
           </button>
         </div>
       </section>
+      <LoginSecurityCard />
       <section className="panel audit-panel">
         <PanelTitle title="数据完整性" subtitle="专业收益计算所需条件" />
         <div className="audit-list">
@@ -1808,6 +1809,179 @@ function DataCenter({
         </div>
       </section>
     </div>
+  );
+}
+
+function LoginSecurityCard() {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    currentPassword: "",
+    newUsername: "",
+    newPassword: "",
+    confirmPassword: "",
+  });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/auth/credentials", {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (response.status === 404) {
+          setAvailable(false);
+          return;
+        }
+        const result = (await response.json()) as {
+          username?: string;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(result.error || "无法读取登录设置");
+        setForm((current) => ({
+          ...current,
+          newUsername: result.username ?? "",
+        }));
+        setAvailable(true);
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) {
+          setAvailable(false);
+          setError(
+            caught instanceof Error ? caught.message : "无法读取登录设置",
+          );
+        }
+      });
+    return () => controller.abort();
+  }, []);
+
+  const set = (key: keyof typeof form, value: string) =>
+    setForm((current) => ({ ...current, [key]: value }));
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    if (form.newPassword !== form.confirmPassword) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await fetch("/auth/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: form.currentPassword,
+          newUsername: form.newUsername,
+          newPassword: form.newPassword,
+        }),
+      });
+      const result = (await response.json()) as {
+        message?: string;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(result.error || "登录信息修改失败");
+      setMessage(result.message || "登录信息已修改，请使用新账号重新登录");
+      setForm((current) => ({
+        ...current,
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      }));
+      window.setTimeout(() => window.location.assign("/"), 1200);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "登录信息修改失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="data-card security-card">
+      <div className="data-icon blue">
+        <ShieldCheck size={22} />
+      </div>
+      <div className="security-content">
+        <h2>安全与登录</h2>
+        <p>
+          修改本网站的登录账号和密码。新凭据使用加盐哈希保存，不会写入投资数据库。
+        </p>
+        {available === false ? (
+          <div className="security-unavailable">
+            {error ||
+              "请在独立服务器域名中使用此功能。私有备用站由平台账号保护。"}
+          </div>
+        ) : (
+          <form className="form-grid security-form" onSubmit={save}>
+            <Field label="当前密码">
+              <input
+                required
+                type="password"
+                autoComplete="current-password"
+                value={form.currentPassword}
+                onChange={(event) => set("currentPassword", event.target.value)}
+              />
+            </Field>
+            <Field label="新登录账号">
+              <input
+                required
+                minLength={3}
+                maxLength={32}
+                autoComplete="username"
+                value={form.newUsername}
+                onChange={(event) => set("newUsername", event.target.value)}
+              />
+              <small>3–32 位字母、数字、点、下划线或短横线</small>
+            </Field>
+            <Field label="新密码">
+              <input
+                required
+                type="password"
+                minLength={12}
+                maxLength={128}
+                autoComplete="new-password"
+                value={form.newPassword}
+                onChange={(event) => set("newPassword", event.target.value)}
+              />
+              <small>至少 12 位，并包含字母、数字、符号等至少三类字符</small>
+            </Field>
+            <Field label="再次输入新密码">
+              <input
+                required
+                type="password"
+                minLength={12}
+                maxLength={128}
+                autoComplete="new-password"
+                value={form.confirmPassword}
+                onChange={(event) => set("confirmPassword", event.target.value)}
+              />
+            </Field>
+            {(error || message) && (
+              <div
+                className={`security-status ${message ? "success" : "error"}`}
+                role="status"
+              >
+                {message || error}
+              </div>
+            )}
+            <div className="security-actions">
+              <button
+                className="primary-button"
+                disabled={busy || available !== true}
+                type="submit"
+              >
+                <ShieldCheck size={17} />
+                {busy ? "正在更新…" : "更新登录信息"}
+              </button>
+              <span>更新后旧账号立即失效，浏览器会要求重新登录。</span>
+            </div>
+          </form>
+        )}
+      </div>
+    </section>
   );
 }
 

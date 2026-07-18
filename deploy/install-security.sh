@@ -12,8 +12,19 @@ install -d -o yingji -g yingji -m 0700 /opt/yingji/current/dist/server/.wrangler
 chown -R yingji:yingji /opt/yingji/current/dist/server/.wrangler
 find /opt/yingji/current/dist/server/.wrangler -type d -exec chmod 0700 {} +
 find /opt/yingji/current/dist/server/.wrangler -type f -exec chmod 0600 {} +
-chown root:www-data /etc/nginx/yingji.htpasswd
-chmod 0640 /etc/nginx/yingji.htpasswd
+
+if ! id -u yingji-auth >/dev/null 2>&1; then
+  useradd --system --home-dir /var/lib/yingji-auth --shell /usr/sbin/nologin yingji-auth
+fi
+install -d -o yingji-auth -g www-data -m 0750 /var/lib/yingji-auth
+if [[ ! -f /var/lib/yingji-auth/credentials.htpasswd ]]; then
+  install -o yingji-auth -g www-data -m 0640 \
+    /etc/nginx/yingji.htpasswd /var/lib/yingji-auth/credentials.htpasswd
+else
+  chown yingji-auth:www-data /var/lib/yingji-auth/credentials.htpasswd
+  chmod 0640 /var/lib/yingji-auth/credentials.htpasswd
+fi
+chmod 0600 /etc/nginx/yingji.htpasswd
 
 REAL_IP_TMP="$(mktemp)"
 trap 'rm -f "$REAL_IP_TMP"' EXIT
@@ -33,9 +44,14 @@ install -m 0644 /opt/yingji/current/deploy/nginx-yingji.conf /etc/nginx/sites-av
 chmod 0755 /opt/yingji/current/deploy/backup-yingji.sh
 install -m 0644 /opt/yingji/current/deploy/yingji-backup.service /etc/systemd/system/yingji-backup.service
 install -m 0644 /opt/yingji/current/deploy/yingji-backup.timer /etc/systemd/system/yingji-backup.timer
+install -m 0644 /opt/yingji/current/deploy/yingji-auth.service /etc/systemd/system/yingji-auth.service
 
+systemctl daemon-reload
+systemctl enable --now yingji-auth.service
+systemctl restart yingji-auth.service
+curl --fail --silent --show-error --unix-socket /run/yingji-auth/auth.sock \
+  http://localhost/health >/dev/null
 nginx -t
 systemctl reload nginx
-systemctl daemon-reload
 systemctl enable --now yingji-backup.timer
 systemctl start yingji-backup.service

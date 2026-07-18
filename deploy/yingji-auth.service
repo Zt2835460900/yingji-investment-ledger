@@ -1,0 +1,34 @@
+[Unit]
+Description=Yingji local credential manager
+After=network.target
+
+[Service]
+Type=simple
+User=yingji-auth
+Group=www-data
+WorkingDirectory=/opt/yingji/current/deploy
+Environment=AUTH_SOCKET=/run/yingji-auth/auth.sock
+Environment=AUTH_FILE=/var/lib/yingji-auth/credentials.htpasswd
+Environment=PUBLIC_ORIGIN=https://yingji.kivelo0017.xyz
+Environment=OPENSSL_BIN=/usr/bin/openssl
+ExecStart=/usr/bin/node /opt/yingji/current/deploy/auth-server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/yingji-auth
+RuntimeDirectory=yingji-auth
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

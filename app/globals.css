@@ -1241,6 +1241,49 @@ td small {
   display: flex;
   gap: 8px;
 }
+.security-card {
+  grid-column: 1 / -1;
+}
+.security-content {
+  min-width: 0;
+}
+.security-form {
+  max-width: 780px;
+  margin-top: 16px;
+}
+.security-status,
+.security-actions {
+  grid-column: 1 / -1;
+}
+.security-status {
+  padding: 11px 12px;
+  border-radius: 9px;
+  font-size: 10px;
+}
+.security-status.error {
+  color: #a73f4b;
+  background: #fdecef;
+}
+.security-status.success {
+  color: #147b5c;
+  background: #e7f6f0;
+}
+.security-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.security-actions span,
+.security-unavailable {
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.6;
+}
+.security-unavailable {
+  padding: 12px;
+  border-radius: 9px;
+  background: #f7f8fb;
+}
 .audit-panel,
 .danger-zone {
   grid-column: 1 / -1;
@@ -1791,6 +1834,13 @@ td small {
   }
   .form-grid {
     grid-template-columns: 1fr;
+  }
+  .security-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .security-actions .primary-button {
+    width: 100%;
   }
   .wide,
   .form-note {
