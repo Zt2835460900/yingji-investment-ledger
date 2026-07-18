@@ -863,8 +863,8 @@ function Overview({
                 <Pie
                   data={data.allocation}
                   dataKey="value"
-                  innerRadius={57}
-                  outerRadius={78}
+                  innerRadius="64%"
+                  outerRadius="90%"
                   paddingAngle={3}
                   stroke="none"
                 >
@@ -1596,8 +1596,8 @@ function Allocation({
               <Pie
                 data={data.allocation}
                 dataKey="value"
-                innerRadius={83}
-                outerRadius={108}
+                innerRadius="67%"
+                outerRadius="88%"
                 paddingAngle={3}
                 stroke="none"
               >
