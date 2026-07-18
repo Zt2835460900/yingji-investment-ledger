@@ -49,6 +49,11 @@ install -m 0644 /opt/yingji/current/deploy/yingji-auth.service /etc/systemd/syst
 systemctl daemon-reload
 systemctl enable --now yingji-auth.service
 systemctl restart yingji-auth.service
+for _ in {1..50}; do
+  [[ -S /run/yingji-auth/auth.sock ]] && break
+  sleep 0.1
+done
+[[ -S /run/yingji-auth/auth.sock ]]
 curl --fail --silent --show-error --unix-socket /run/yingji-auth/auth.sock \
   http://localhost/health >/dev/null
 nginx -t
