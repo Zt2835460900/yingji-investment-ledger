@@ -1,5 +1,11 @@
 import { calculatePortfolio } from "@/lib/calculations";
 import {
+  calculateFifoRedemptionFeeUnits,
+  calculateTradingFeeUnits,
+  feeRuleFromInput,
+} from "@/lib/fees";
+import { fetchLiveFundData } from "@/lib/fund-data";
+import {
   decimalToUnits,
   isoDate,
   PRICE_SCALE,
@@ -31,12 +37,12 @@ async function loadPortfolio() {
         .all<AccountRow>(),
       d1
         .prepare(
-          "SELECT id, name, code, market, asset_class, currency FROM instruments ORDER BY id",
+          "SELECT id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at FROM instruments ORDER BY id",
         )
         .all<InstrumentRow>(),
       d1
         .prepare(
-          "SELECT id, account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref FROM ledger_entries ORDER BY trade_date, id",
+          "SELECT id, account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
         )
         .all<LedgerRow>(),
       d1
@@ -83,6 +89,10 @@ export async function POST(request: Request) {
     const body = (await request.json()) as Record<string, unknown>;
     const action = String(body.action ?? "");
 
+    if (action === "lookupFund") {
+      return Response.json(await fetchLiveFundData(String(body.code ?? "")));
+    }
+
     if (action === "createEntry") {
       const kind = String(body.kind ?? "").toUpperCase();
       const allowed = new Set([
@@ -111,6 +121,112 @@ export async function POST(request: Request) {
       if (!grossAmountUnits && quantityUnits && priceUnits)
         grossAmountUnits = tradeGrossUnits(quantityUnits, priceUnits);
       if (grossAmountUnits <= 0) throw new Error("金额必须大于 0");
+      let feeUnits = decimalToUnits(body.fee);
+      let feeSource = String(body.fee ?? "").trim() === "" ? "AUTO" : "ACTUAL";
+      const purchaseChannel = String(body.purchaseChannel ?? "DIRECT");
+      if (
+        ["BUY", "SELL"].includes(kind) &&
+        String(body.fee ?? "").trim() === "" &&
+        instrumentId
+      ) {
+        let instrument = await d1
+          .prepare(
+            "SELECT code, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, redemption_fee_json FROM instruments WHERE id = ?",
+          )
+          .bind(instrumentId)
+          .first<{
+            code: string;
+            product_type: string;
+            buy_fee_bps: number;
+            buy_discount_bps: number;
+            sell_fee_bps: number;
+            min_fee_units: number;
+            eastmoney_fee_bps: number;
+            redemption_fee_json: string;
+          }>();
+        if (!instrument) throw new Error("基金/证券代码不存在");
+        if (instrument.product_type === "FUND" && /^\d{6}$/.test(instrument.code)) {
+          try {
+            const live = await fetchLiveFundData(instrument.code);
+            await d1
+              .prepare(
+                "UPDATE instruments SET name = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+              )
+              .bind(
+                live.name,
+                live.standardBuyFeeBps,
+                live.eastmoneyBuyFeeBps,
+                decimalToUnits(live.minPurchase),
+                JSON.stringify(live.redemptionTiers),
+                live.source,
+                live.updatedAt,
+                instrumentId,
+              )
+              .run();
+            if (live.latestNav && live.latestNavDate)
+              await d1
+                .prepare(
+                  "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+                )
+                .bind(
+                  instrumentId,
+                  live.latestNavDate,
+                  decimalToUnits(live.latestNav, PRICE_SCALE),
+                )
+                .run();
+            instrument = {
+              ...instrument,
+              buy_fee_bps: live.standardBuyFeeBps,
+              eastmoney_fee_bps: live.eastmoneyBuyFeeBps,
+              redemption_fee_json: JSON.stringify(live.redemptionTiers),
+            };
+          } catch {
+            // Keep the last synchronized rules when the external source is unavailable.
+          }
+        }
+        if (kind === "SELL") {
+          const history = await d1
+            .prepare(
+              "SELECT kind, trade_date, quantity_units FROM ledger_entries WHERE account_id = ? AND instrument_id = ? AND trade_date <= ? AND kind IN ('BUY','SELL') ORDER BY trade_date, id",
+            )
+            .bind(accountId, instrumentId, tradeDate)
+            .all<{ kind: string; trade_date: string; quantity_units: number }>();
+          const lots: Array<{ tradeDate: string; quantityUnits: number }> = [];
+          for (const row of history.results) {
+            if (row.kind === "BUY") lots.push({ tradeDate: row.trade_date, quantityUnits: row.quantity_units });
+            else {
+              let consumed = row.quantity_units;
+              for (const lot of lots) {
+                const take = Math.min(consumed, lot.quantityUnits);
+                lot.quantityUnits -= take;
+                consumed -= take;
+                if (consumed <= 0) break;
+              }
+            }
+          }
+          const tiers = JSON.parse(instrument.redemption_fee_json || "[]");
+          feeUnits = calculateFifoRedemptionFeeUnits(
+            lots.filter((lot) => lot.quantityUnits > 0),
+            quantityUnits,
+            grossAmountUnits,
+            tradeDate,
+            tiers,
+          );
+          feeSource = tiers.length ? "LIVE_REDEMPTION_FIFO" : "PRODUCT_RULE";
+        } else {
+          const channelRate =
+            purchaseChannel === "EASTMONEY" && instrument.eastmoney_fee_bps > 0
+              ? instrument.eastmoney_fee_bps
+              : instrument.buy_fee_bps;
+          feeUnits = calculateTradingFeeUnits("BUY", grossAmountUnits, {
+            buyFeeBps: channelRate,
+            buyDiscountBps: 10_000,
+            sellFeeBps: instrument.sell_fee_bps,
+            minFeeUnits: instrument.min_fee_units,
+          });
+          feeSource = purchaseChannel === "EASTMONEY" ? "LIVE_EASTMONEY" : "LIVE_STANDARD";
+        }
+      }
       if (kind === "SELL" && instrumentId) {
         const position = await d1
           .prepare(
@@ -125,8 +241,8 @@ export async function POST(request: Request) {
       await d1
         .prepare(
           `INSERT INTO ledger_entries
-        (account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           accountId,
@@ -136,10 +252,12 @@ export async function POST(request: Request) {
           quantityUnits,
           priceUnits,
           grossAmountUnits,
-          decimalToUnits(body.fee),
+          feeUnits,
           decimalToUnits(body.tax),
           String(body.notes ?? "").slice(0, 200),
           String(body.externalRef ?? "").slice(0, 100),
+          purchaseChannel.slice(0, 30),
+          feeSource.slice(0, 40),
         )
         .run();
       if (instrumentId && priceUnits) {
@@ -165,9 +283,20 @@ export async function POST(request: Request) {
         .trim()
         .toUpperCase();
       if (!name || !code) throw new Error("产品名称和代码不能为空");
-      await d1
+      const feeRule = feeRuleFromInput(body);
+      if (
+        feeRule.buyFeeBps < 0 ||
+        feeRule.buyFeeBps > 10_000 ||
+        feeRule.buyDiscountBps < 0 ||
+        feeRule.buyDiscountBps > 10_000 ||
+        feeRule.sellFeeBps < 0 ||
+        feeRule.sellFeeBps > 10_000 ||
+        feeRule.minFeeUnits < 0
+      )
+        throw new Error("费率必须在 0%–100% 之间，最低手续费不能为负数");
+      const created = await d1
         .prepare(
-          "INSERT INTO instruments (name, code, market, asset_class, currency) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           name.slice(0, 80),
@@ -175,8 +304,31 @@ export async function POST(request: Request) {
           String(body.market ?? "CN"),
           String(body.assetClass ?? "OTHER"),
           String(body.currency ?? "CNY"),
+          String(body.productType ?? "FUND"),
+          feeRule.buyFeeBps,
+          feeRule.buyDiscountBps,
+          feeRule.sellFeeBps,
+          feeRule.minFeeUnits,
+          Math.round(Number(body.eastmoneyFeePercent ?? 0) * 100),
+          decimalToUnits(body.minPurchase),
+          String(body.redemptionFeeJson ?? "[]"),
+          String(body.dataSource ?? "MANUAL"),
+          String(body.sourceUpdatedAt ?? ""),
         )
         .run();
+      const newInstrumentId = Number(created.meta.last_row_id);
+      if (newInstrumentId && body.latestNav && body.latestNavDate)
+        await d1
+          .prepare(
+            "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, ?)",
+          )
+          .bind(
+            newInstrumentId,
+            isoDate(body.latestNavDate),
+            decimalToUnits(body.latestNav, PRICE_SCALE),
+            String(body.dataSource ?? "MANUAL"),
+          )
+          .run();
     } else if (action === "createPlan") {
       await d1
         .prepare(
@@ -220,8 +372,17 @@ export async function POST(request: Request) {
         .prepare("SELECT id, name FROM accounts")
         .all<{ id: number; name: string }>();
       const instruments = await d1
-        .prepare("SELECT id, code FROM instruments")
-        .all<{ id: number; code: string }>();
+        .prepare(
+          "SELECT id, code, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units FROM instruments",
+        )
+        .all<{
+          id: number;
+          code: string;
+          buy_fee_bps: number;
+          buy_discount_bps: number;
+          sell_fee_bps: number;
+          min_fee_units: number;
+        }>();
       const accountMap = new Map(
         accounts.results.map((row: { id: number; name: string }) => [
           row.name,
@@ -229,16 +390,17 @@ export async function POST(request: Request) {
         ]),
       );
       const instrumentMap = new Map(
-        instruments.results.map((row: { id: number; code: string }) => [
+        instruments.results.map((row) => [
           row.code.toUpperCase(),
-          row.id,
+          row,
         ]),
       );
       const statements = rows.map((row, index) => {
         const accountId = accountMap.get(String(row.accountName ?? ""));
-        const instrumentId = row.code
+        const instrument = row.code
           ? (instrumentMap.get(String(row.code).toUpperCase()) ?? null)
           : null;
+        const instrumentId = instrument?.id ?? null;
         const kind = String(row.kind ?? "").toUpperCase();
         if (
           !["DEPOSIT", "WITHDRAWAL", "BUY", "SELL", "DIVIDEND", "FEE"].includes(
@@ -256,6 +418,17 @@ export async function POST(request: Request) {
           amountUnits = tradeGrossUnits(quantityUnits, priceUnits);
         if (amountUnits <= 0)
           throw new Error(`第 ${index + 2} 行金额必须大于 0`);
+        const feeUnits =
+          String(row.fee ?? "").trim() === "" &&
+          instrument &&
+          (kind === "BUY" || kind === "SELL")
+            ? calculateTradingFeeUnits(kind, amountUnits, {
+                buyFeeBps: instrument.buy_fee_bps,
+                buyDiscountBps: instrument.buy_discount_bps,
+                sellFeeBps: instrument.sell_fee_bps,
+                minFeeUnits: instrument.min_fee_units,
+              })
+            : decimalToUnits(row.fee);
         return d1
           .prepare(
             `INSERT INTO ledger_entries
@@ -270,7 +443,7 @@ export async function POST(request: Request) {
             quantityUnits,
             priceUnits,
             amountUnits,
-            decimalToUnits(row.fee),
+            feeUnits,
             decimalToUnits(row.tax),
             String(row.notes ?? ""),
             String(row.externalRef ?? ""),

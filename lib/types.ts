@@ -15,6 +15,16 @@ export interface InstrumentRow {
   market: string;
   asset_class: string;
   currency: string;
+  product_type: string;
+  buy_fee_bps: number;
+  buy_discount_bps: number;
+  sell_fee_bps: number;
+  min_fee_units: number;
+  eastmoney_fee_bps: number;
+  min_purchase_units: number;
+  redemption_fee_json: string;
+  data_source: string;
+  source_updated_at: string;
 }
 
 export interface LedgerRow {
@@ -30,6 +40,8 @@ export interface LedgerRow {
   tax_units: number;
   notes: string;
   external_ref: string;
+  purchase_channel: string;
+  fee_source: string;
 }
 
 export interface PriceRow {

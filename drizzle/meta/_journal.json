@@ -15,6 +15,20 @@
       "when": 1784345956320,
       "tag": "0001_misty_la_nuit",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784348369151,
+      "tag": "0002_glamorous_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1784348930843,
+      "tag": "0003_tan_snowbird",
+      "breakpoints": true
     }
   ]
 }

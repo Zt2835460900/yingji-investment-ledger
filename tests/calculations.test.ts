@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { calculatePortfolio, calculateXirr } from "../lib/calculations";
+import { calculateTradingFeeUnits } from "../lib/fees";
+import { calculateFifoRedemptionFeeUnits } from "../lib/fees";
 import {
   decimalToUnits,
   MONEY_SCALE,
@@ -42,6 +44,43 @@ test("scaled integer helpers avoid floating-point storage drift", () => {
   );
 });
 
+test("fund subscription fee applies platform discount and exact rounding", () => {
+  const fee = calculateTradingFeeUnits("BUY", 10_000 * MONEY_SCALE, {
+    buyFeeBps: 150,
+    buyDiscountBps: 1_000,
+    sellFeeBps: 50,
+    minFeeUnits: 0,
+  });
+  assert.equal(fee, 15 * MONEY_SCALE);
+});
+
+test("ETF commission respects the configured minimum fee", () => {
+  const fee = calculateTradingFeeUnits("BUY", 1_000 * MONEY_SCALE, {
+    buyFeeBps: 3,
+    buyDiscountBps: 10_000,
+    sellFeeBps: 3,
+    minFeeUnits: 5 * MONEY_SCALE,
+  });
+  assert.equal(fee, 5 * MONEY_SCALE);
+});
+
+test("fund redemption fee uses FIFO holding-period tiers", () => {
+  const fee = calculateFifoRedemptionFeeUnits(
+    [
+      { tradeDate: "2026-07-15", quantityUnits: 100 * QUANTITY_SCALE },
+      { tradeDate: "2026-01-01", quantityUnits: 100 * QUANTITY_SCALE },
+    ],
+    150 * QUANTITY_SCALE,
+    1_500 * MONEY_SCALE,
+    "2026-07-18",
+    [
+      { label: "小于7天", minDays: 0, maxDays: 7, rateBps: 150 },
+      { label: "大于等于7天", minDays: 7, maxDays: null, rateBps: 50 },
+    ],
+  );
+  assert.equal(fee, 17.5 * MONEY_SCALE);
+});
+
 test("a new deposit does not create TWR profit", () => {
   const accounts: AccountRow[] = [
     {
@@ -60,6 +99,16 @@ test("a new deposit does not create TWR profit", () => {
       market: "CN",
       asset_class: "股票",
       currency: "CNY",
+      product_type: "ETF",
+      buy_fee_bps: 3,
+      buy_discount_bps: 10_000,
+      sell_fee_bps: 3,
+      min_fee_units: 5 * MONEY_SCALE,
+      eastmoney_fee_bps: 3,
+      min_purchase_units: 0,
+      redemption_fee_json: "[]",
+      data_source: "TEST",
+      source_updated_at: "",
     },
   ];
   const ledger: LedgerRow[] = [
@@ -76,6 +125,8 @@ test("a new deposit does not create TWR profit", () => {
       tax_units: 0,
       notes: "",
       external_ref: "",
+      purchase_channel: "DIRECT",
+      fee_source: "TEST",
     },
     {
       id: 2,
@@ -90,6 +141,8 @@ test("a new deposit does not create TWR profit", () => {
       tax_units: 0,
       notes: "",
       external_ref: "",
+      purchase_channel: "DIRECT",
+      fee_source: "TEST",
     },
     {
       id: 3,
@@ -104,6 +157,8 @@ test("a new deposit does not create TWR profit", () => {
       tax_units: 0,
       notes: "",
       external_ref: "",
+      purchase_channel: "DIRECT",
+      fee_source: "TEST",
     },
   ];
   const prices: PriceRow[] = [

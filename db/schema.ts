@@ -33,6 +33,16 @@ export const instruments = sqliteTable(
     market: text("market").notNull().default("CN"),
     assetClass: text("asset_class").notNull().default("OTHER"),
     currency: text("currency").notNull().default("CNY"),
+    productType: text("product_type").notNull().default("FUND"),
+    buyFeeBps: integer("buy_fee_bps").notNull().default(0),
+    buyDiscountBps: integer("buy_discount_bps").notNull().default(10000),
+    sellFeeBps: integer("sell_fee_bps").notNull().default(0),
+    minFeeUnits: integer("min_fee_units").notNull().default(0),
+    eastmoneyFeeBps: integer("eastmoney_fee_bps").notNull().default(0),
+    minPurchaseUnits: integer("min_purchase_units").notNull().default(0),
+    redemptionFeeJson: text("redemption_fee_json").notNull().default("[]"),
+    dataSource: text("data_source").notNull().default("MANUAL"),
+    sourceUpdatedAt: text("source_updated_at").notNull().default(""),
     createdAt: text("created_at")
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),
@@ -55,6 +65,8 @@ export const ledgerEntries = sqliteTable(
     taxUnits: integer("tax_units").notNull().default(0),
     notes: text("notes").notNull().default(""),
     externalRef: text("external_ref").notNull().default(""),
+    purchaseChannel: text("purchase_channel").notNull().default("MANUAL"),
+    feeSource: text("fee_source").notNull().default("MANUAL"),
     createdAt: text("created_at")
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),

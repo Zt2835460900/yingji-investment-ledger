@@ -102,6 +102,16 @@ interface PortfolioData {
     market: string;
     asset_class: string;
     currency: string;
+    product_type: string;
+    buy_fee_bps: number;
+    buy_discount_bps: number;
+    sell_fee_bps: number;
+    min_fee_units: number;
+    eastmoney_fee_bps: number;
+    min_purchase_units: number;
+    redemption_fee_json: string;
+    data_source: string;
+    source_updated_at: string;
   }>;
   ledger: Array<{
     id: number;
@@ -115,6 +125,8 @@ interface PortfolioData {
     fee_units: number;
     tax_units: number;
     notes: string;
+    purchase_channel: string;
+    fee_source: string;
   }>;
   holdings: Array<{
     accountId: number;
@@ -196,6 +208,12 @@ const kindLabels: Record<string, string> = {
   SELL: "卖出",
   DIVIDEND: "分红",
   FEE: "费用",
+};
+const channelLabels: Record<string, string> = {
+  DIRECT: "基金公司直销",
+  EASTMONEY: "天天基金",
+  OTHER: "其他渠道",
+  MANUAL: "手工录入",
 };
 
 const money = (value: number, digits = 2) =>
@@ -969,7 +987,7 @@ function Ledger({
                       <strong>{instrument?.name ?? account?.name}</strong>
                       <small>
                         {instrument
-                          ? `${account?.name} · ${instrument.code}`
+                          ? `${account?.name} · ${instrument.code} · ${channelLabels[entry.purchase_channel] ?? entry.purchase_channel}`
                           : entry.notes || "外部资金流"}
                       </small>
                     </td>
@@ -1581,6 +1599,7 @@ function ModalForm({
     kind: "BUY",
     accountId: String(data.accounts[0]?.id ?? ""),
     instrumentId: String(data.instruments[0]?.id ?? ""),
+    instrumentCode: data.instruments[0]?.code ?? "",
     tradeDate: today,
     priceDate: today,
     nextDate: today,
@@ -1588,17 +1607,101 @@ function ModalForm({
     market: "CN",
     assetClass: "美国股票",
     currency: "CNY",
+    productType: "FUND",
+    buyFeePercent: "0.15",
+    buyDiscountPercent: "100",
+    sellFeePercent: "0.50",
+    minFee: "0",
+    purchaseChannel: "EASTMONEY",
+    eastmoneyFeePercent: "0",
+    minPurchase: "0",
+    redemptionFeeJson: "[]",
+    dataSource: "MANUAL",
+    sourceUpdatedAt: "",
+    latestNav: "",
+    latestNavDate: "",
     color: "#5B7CFA",
   });
   const set = (key: string, value: string) =>
     setForm({ ...form, [key]: value });
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupNote, setLookupNote] = useState("");
+  const selectedInstrument = data.instruments.find(
+    (item) => item.id === Number(form.instrumentId),
+  );
+  const grossPreview =
+    Number(form.amount || 0) ||
+    Number(form.quantity || 0) * Number(form.price || 0);
+  const baseFeeBps =
+    form.kind === "BUY"
+      ? form.purchaseChannel === "EASTMONEY"
+        ? (selectedInstrument?.eastmoney_fee_bps ?? 0)
+        : (selectedInstrument?.buy_fee_bps ?? 0)
+      : (selectedInstrument?.sell_fee_bps ?? 0);
+  const discountBps =
+    form.kind === "BUY"
+      ? (selectedInstrument?.buy_discount_bps ?? 10_000)
+      : 10_000;
+  const estimatedFee = Math.max(
+    grossPreview * ((baseFeeBps * discountBps) / 10_000) / 10_000,
+    baseFeeBps > 0 ? (selectedInstrument?.min_fee_units ?? 0) / 10_000 : 0,
+  );
+  const lookupFund = async () => {
+    if (!/^\d{6}$/.test(form.code ?? "")) {
+      setLookupNote("请输入 6 位场外基金代码");
+      return;
+    }
+    setLookupBusy(true);
+    setLookupNote("");
+    try {
+      const response = await fetch("/api/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "lookupFund", code: form.code }),
+      });
+      const result = (await response.json()) as {
+        error?: string;
+        name: string;
+        standardBuyFeeBps: number;
+        eastmoneyBuyFeeBps: number;
+        minPurchase: number;
+        latestNav: number;
+        latestNavDate: string;
+        redemptionTiers: unknown[];
+        source: string;
+        updatedAt: string;
+      };
+      if (!response.ok) throw new Error(result.error || "查询失败");
+      setForm((current) => ({
+        ...current,
+        name: result.name,
+        productType: "FUND",
+        buyFeePercent: String(result.standardBuyFeeBps / 100),
+        buyDiscountPercent: "100",
+        eastmoneyFeePercent: String(result.eastmoneyBuyFeeBps / 100),
+        minPurchase: String(result.minPurchase),
+        latestNav: String(result.latestNav),
+        latestNavDate: result.latestNavDate,
+        redemptionFeeJson: JSON.stringify(result.redemptionTiers),
+        dataSource: result.source,
+        sourceUpdatedAt: result.updatedAt,
+      }));
+      setLookupNote(
+        `已同步：净值 ${result.latestNav || "—"}（${result.latestNavDate || "暂无日期"}），标准申购费 ${(result.standardBuyFeeBps / 100).toFixed(2)}%，天天基金 ${(result.eastmoneyBuyFeeBps / 100).toFixed(2)}%`,
+      );
+    } catch (caught) {
+      setLookupNote(caught instanceof Error ? caught.message : "查询失败");
+    } finally {
+      setLookupBusy(false);
+    }
+  };
   const title =
     type === "entry"
       ? "新增流水"
       : type === "account"
         ? "创建投资账户"
         : type === "instrument"
-          ? "新增投资产品"
+            ? "新增基金 / 证券"
           : type === "plan"
             ? "新建定投计划"
             : "更新价格 / 净值";
@@ -1671,17 +1774,63 @@ function ModalForm({
                   </select>
                 </Field>
                 {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (
-                  <Field label="投资产品">
-                    <select
-                      value={form.instrumentId}
-                      onChange={(e) => set("instrumentId", e.target.value)}
-                    >
+                  <Field label="基金 / 证券代码">
+                    <input
+                      required
+                      list="instrument-codes"
+                      autoComplete="off"
+                      placeholder="输入代码，例如 000001"
+                      value={form.instrumentCode}
+                      onChange={(event) => {
+                        const code = event.target.value.trim().toUpperCase();
+                        const matched = data.instruments.find(
+                          (item) => item.code.toUpperCase() === code,
+                        );
+                        setForm((current) => ({
+                          ...current,
+                          instrumentCode: code,
+                          instrumentId: matched ? String(matched.id) : "",
+                          fee: "",
+                        }));
+                      }}
+                    />
+                    <datalist id="instrument-codes">
                       {data.instruments.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name} · {item.code}
+                        <option key={item.id} value={item.code}>
+                          {item.name}
                         </option>
                       ))}
+                    </datalist>
+                    <small>
+                      {selectedInstrument
+                        ? `${selectedInstrument.name} · ${selectedInstrument.product_type}`
+                        : "代码未收录，请先在“新增基金/证券”中建立产品"}
+                    </small>
+                  </Field>
+                )}
+                {["BUY", "SELL"].includes(form.kind) && (
+                  <Field label="购买 / 交易渠道">
+                    <select
+                      value={form.purchaseChannel}
+                      onChange={(e) => {
+                        setForm((current) => ({
+                          ...current,
+                          purchaseChannel: e.target.value,
+                          fee: "",
+                        }));
+                      }}
+                    >
+                      <option value="DIRECT">基金公司直销</option>
+                      <option value="EASTMONEY">天天基金（第三方）</option>
+                      <option value="OTHER">其他第三方 / 银行 / 券商</option>
                     </select>
+                    <small>
+                      {form.purchaseChannel === "DIRECT"
+                        ? "采用基金公开标准申购费率"
+                        : form.purchaseChannel === "EASTMONEY"
+                          ? "采用同步的天天基金当前优惠费率"
+                          : "请在手续费中填写该渠道成交账单的实际费用"}
+                    </small>
                   </Field>
                 )}
                 <Field label="交易日期">
@@ -1735,6 +1884,13 @@ function ModalForm({
                         value={form.fee ?? ""}
                         onChange={(e) => set("fee", e.target.value)}
                       />
+                      {!["DIVIDEND"].includes(form.kind) && (
+                        <small>
+                          {form.kind === "SELL" && selectedInstrument?.redemption_fee_json !== "[]"
+                            ? "留空后按真实赎回费率和 FIFO 持有期自动计算"
+                            : `留空自动计算：预计 ¥${money(estimatedFee)}；填写后以实际费用为准`}
+                        </small>
+                      )}
                     </Field>
                     <Field label="税费">
                       <input
@@ -1757,8 +1913,8 @@ function ModalForm({
               <div className="form-note">
                 <ShieldCheck size={17} />
                 <span>
-                  买卖属于账户内部资产转换；只有入金和出金会作为外部现金流影响
-                  XIRR，并从 TWR 中剔除。
+                  系统按产品费率自动估算手续费，真实成交后可用账单金额覆盖；费用会计入成本、
+                  已实现收益和总收益。只有入金和出金作为外部现金流影响 XIRR。
                 </span>
               </div>
             </>
@@ -1791,21 +1947,43 @@ function ModalForm({
           )}
           {type === "instrument" && (
             <div className="form-grid">
+              <Field label="基金 / 证券代码">
+                <input
+                  required
+                  autoFocus
+                  placeholder="例如：000001 或 510300"
+                  value={form.code ?? ""}
+                  onChange={(e) => set("code", e.target.value.toUpperCase())}
+                />
+                <button
+                  type="button"
+                  className="lookup-button"
+                  disabled={lookupBusy}
+                  onClick={() => void lookupFund()}
+                >
+                  <Search size={15} />
+                  {lookupBusy ? "同步中…" : "查询真实基金数据"}
+                </button>
+                {lookupNote && <small>{lookupNote}</small>}
+              </Field>
               <Field label="产品名称">
                 <input
                   required
-                  placeholder="例如：沪深300ETF"
+                  placeholder="例如：华夏成长混合"
                   value={form.name ?? ""}
                   onChange={(e) => set("name", e.target.value)}
                 />
               </Field>
-              <Field label="产品代码">
-                <input
-                  required
-                  placeholder="例如：510300"
-                  value={form.code ?? ""}
-                  onChange={(e) => set("code", e.target.value)}
-                />
+              <Field label="产品类型">
+                <select
+                  value={form.productType}
+                  onChange={(e) => set("productType", e.target.value)}
+                >
+                  <option value="FUND">场外基金</option>
+                  <option value="ETF">ETF</option>
+                  <option value="STOCK">股票</option>
+                  <option value="OTHER">其他</option>
+                </select>
               </Field>
               <Field label="市场">
                 <select
@@ -1841,6 +2019,66 @@ function ModalForm({
                   <option>HKD</option>
                 </select>
               </Field>
+              <Field label="买入标准费率（%）">
+                <input
+                  required
+                  inputMode="decimal"
+                  placeholder="例如：1.5"
+                  value={form.buyFeePercent}
+                  onChange={(e) => set("buyFeePercent", e.target.value)}
+                />
+              </Field>
+              <Field label="买入费率折扣（%）">
+                <input
+                  required
+                  inputMode="decimal"
+                  placeholder="一折填写 10"
+                  value={form.buyDiscountPercent}
+                  onChange={(e) => set("buyDiscountPercent", e.target.value)}
+                />
+                <small>例如标准费率 1.5%，一折后有效费率为 0.15%</small>
+              </Field>
+              <Field label="天天基金当前费率（%）">
+                <input
+                  required
+                  inputMode="decimal"
+                  value={form.eastmoneyFeePercent}
+                  onChange={(e) => set("eastmoneyFeePercent", e.target.value)}
+                />
+                <small>使用“查询真实基金数据”后自动填充</small>
+              </Field>
+              <Field label="最低申购金额（元）">
+                <input
+                  required
+                  inputMode="decimal"
+                  value={form.minPurchase}
+                  onChange={(e) => set("minPurchase", e.target.value)}
+                />
+              </Field>
+              <Field label="卖出 / 赎回费率（%）">
+                <input
+                  required
+                  inputMode="decimal"
+                  placeholder="例如：0.5"
+                  value={form.sellFeePercent}
+                  onChange={(e) => set("sellFeePercent", e.target.value)}
+                />
+              </Field>
+              <Field label="最低手续费（元）">
+                <input
+                  required
+                  inputMode="decimal"
+                  placeholder="场外基金通常为 0"
+                  value={form.minFee}
+                  onChange={(e) => set("minFee", e.target.value)}
+                />
+              </Field>
+              <div className="form-note wide">
+                <ShieldCheck size={17} />
+                <span>
+                  自动费用用于录入预估；最终以基金公司、券商或平台成交账单为准，可在每笔交易中覆盖。
+                </span>
+              </div>
             </div>
           )}
           {type === "plan" && (

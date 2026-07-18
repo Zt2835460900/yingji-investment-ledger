@@ -1,0 +1,21 @@
+[Unit]
+Description=Yingji personal investment ledger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yingji
+Group=yingji
+WorkingDirectory=/opt/yingji/current/dist/server
+Environment=WRANGLER_SEND_METRICS=false
+Environment=WRANGLER_LOG_PATH=/var/lib/yingji/wrangler.log
+ExecStart=/opt/yingji/current/node_modules/.bin/wrangler dev --config wrangler.json --persist-to /var/lib/yingji/state --ip 127.0.0.1 --port 8787 --log-level warn
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

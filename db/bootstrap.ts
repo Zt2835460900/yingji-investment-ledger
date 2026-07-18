@@ -16,6 +16,16 @@ const schemaStatements = [
     market TEXT NOT NULL DEFAULT 'CN',
     asset_class TEXT NOT NULL DEFAULT 'OTHER',
     currency TEXT NOT NULL DEFAULT 'CNY',
+    product_type TEXT NOT NULL DEFAULT 'FUND',
+    buy_fee_bps INTEGER NOT NULL DEFAULT 0,
+    buy_discount_bps INTEGER NOT NULL DEFAULT 10000,
+    sell_fee_bps INTEGER NOT NULL DEFAULT 0,
+    min_fee_units INTEGER NOT NULL DEFAULT 0,
+    eastmoney_fee_bps INTEGER NOT NULL DEFAULT 0,
+    min_purchase_units INTEGER NOT NULL DEFAULT 0,
+    redemption_fee_json TEXT NOT NULL DEFAULT '[]',
+    data_source TEXT NOT NULL DEFAULT 'MANUAL',
+    source_updated_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -31,6 +41,8 @@ const schemaStatements = [
     tax_units INTEGER NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT '',
     external_ref TEXT NOT NULL DEFAULT '',
+    purchase_channel TEXT NOT NULL DEFAULT 'MANUAL',
+    fee_source TEXT NOT NULL DEFAULT 'MANUAL',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS ledger_account_date_idx ON ledger_entries(account_id, trade_date)`,
@@ -61,6 +73,21 @@ const schemaStatements = [
     alert_bps INTEGER NOT NULL DEFAULT 500
   )`,
   `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+];
+
+const upgradeStatements = [
+  `ALTER TABLE instruments ADD COLUMN product_type TEXT NOT NULL DEFAULT 'FUND'`,
+  `ALTER TABLE instruments ADD COLUMN buy_fee_bps INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE instruments ADD COLUMN buy_discount_bps INTEGER NOT NULL DEFAULT 10000`,
+  `ALTER TABLE instruments ADD COLUMN sell_fee_bps INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE instruments ADD COLUMN min_fee_units INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE instruments ADD COLUMN eastmoney_fee_bps INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE instruments ADD COLUMN min_purchase_units INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE instruments ADD COLUMN redemption_fee_json TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE instruments ADD COLUMN data_source TEXT NOT NULL DEFAULT 'MANUAL'`,
+  `ALTER TABLE instruments ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE ledger_entries ADD COLUMN purchase_channel TEXT NOT NULL DEFAULT 'MANUAL'`,
+  `ALTER TABLE ledger_entries ADD COLUMN fee_source TEXT NOT NULL DEFAULT 'MANUAL'`,
 ];
 
 const seedStatements = [
@@ -115,6 +142,13 @@ export async function ensureDatabase() {
   if (initialized) return;
   const d1 = getD1();
   await d1.batch(schemaStatements.map((statement) => d1.prepare(statement)));
+  for (const statement of upgradeStatements) {
+    try {
+      await d1.prepare(statement).run();
+    } catch (error) {
+      if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+    }
+  }
   const seeded = await d1
     .prepare("SELECT value FROM app_meta WHERE key = ?")
     .bind("seed_version")
