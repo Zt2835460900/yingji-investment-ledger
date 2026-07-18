@@ -33,8 +33,9 @@ async function syncFundInstrument(
   d1: D1Database,
   instrumentId: number,
   code: string,
+  quoteDate = "",
 ) {
-  const live = await fetchLiveFundData(code);
+  const live = await fetchLiveFundData(code, quoteDate);
   await d1
     .prepare(
       "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
@@ -63,12 +64,34 @@ async function syncFundInstrument(
         decimalToUnits(live.latestNav, PRICE_SCALE),
       )
       .run();
+  if (
+    live.quoteNav &&
+    live.quoteNavDate &&
+    live.quoteNavDate !== live.latestNavDate
+  )
+    await d1
+      .prepare(
+        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+      )
+      .bind(
+        instrumentId,
+        live.quoteNavDate,
+        decimalToUnits(live.quoteNav, PRICE_SCALE),
+      )
+      .run();
   return live;
 }
 
-async function resolveFundInstrument(d1: D1Database, codeInput: string) {
+async function resolveFundInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDateInput = "",
+) {
   const code = codeInput.trim();
+  const quoteDate = quoteDateInput.trim();
   if (!/^\d{6}$/.test(code)) throw new Error("请输入 6 位基金或 ETF 代码");
+  if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
+    throw new Error("交易日期格式不正确");
   let instrument = await d1
     .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
     .bind(code)
@@ -77,7 +100,7 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
   if (instrument) {
     let live: Awaited<ReturnType<typeof fetchLiveFundData>> | null = null;
     try {
-      live = await syncFundInstrument(d1, instrument.id, code);
+      live = await syncFundInstrument(d1, instrument.id, code, quoteDate);
       instrument = await d1
         .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
         .bind(instrument.id)
@@ -90,16 +113,24 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
       ? null
       : await d1
           .prepare(
-            "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? ORDER BY price_date DESC LIMIT 1",
+            quoteDate
+              ? "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? AND price_date <= ? ORDER BY price_date DESC LIMIT 1"
+              : "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? ORDER BY price_date DESC LIMIT 1",
           )
-          .bind(instrument.id)
+          .bind(...(quoteDate ? [instrument.id, quoteDate] : [instrument.id]))
           .first<{ price_date: string; price_units: number; source: string }>();
     return {
       instrument,
-      latestNav:
-        live?.latestNav ??
+      quoteNav:
+        live?.quoteNav ??
         (cachedPrice ? unitsToNumber(cachedPrice.price_units, PRICE_SCALE) : 0),
-      latestNavDate: live?.latestNavDate ?? cachedPrice?.price_date ?? "",
+      quoteNavDate: live?.quoteNavDate ?? cachedPrice?.price_date ?? "",
+      quoteDateRequested: quoteDate,
+      quoteIsExact: live
+        ? live.quoteIsExact
+        : Boolean(quoteDate && cachedPrice?.price_date === quoteDate),
+      latestNav: live?.latestNav ?? 0,
+      latestNavDate: live?.latestNavDate ?? "",
       fundCategory: live?.fundCategory ?? "",
       confirmationBusinessDays:
         live?.confirmationBusinessDays ??
@@ -113,7 +144,7 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
     };
   }
 
-  const live = await fetchLiveFundData(code);
+  const live = await fetchLiveFundData(code, quoteDate);
   await d1
     .prepare(
       "INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at) VALUES (?, ?, 'CN', ?, 'CNY', ?, ?, 10000, 0, 0, ?, ?, ?, ?, ?)",
@@ -147,8 +178,27 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
         decimalToUnits(live.latestNav, PRICE_SCALE),
       )
       .run();
+  if (
+    live.quoteNav &&
+    live.quoteNavDate &&
+    live.quoteNavDate !== live.latestNavDate
+  )
+    await d1
+      .prepare(
+        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+      )
+      .bind(
+        instrument.id,
+        live.quoteNavDate,
+        decimalToUnits(live.quoteNav, PRICE_SCALE),
+      )
+      .run();
   return {
     instrument,
+    quoteNav: live.quoteNav,
+    quoteNavDate: live.quoteNavDate,
+    quoteDateRequested: quoteDate,
+    quoteIsExact: live.quoteIsExact,
     latestNav: live.latestNav,
     latestNavDate: live.latestNavDate,
     fundCategory: live.fundCategory,
@@ -257,12 +307,36 @@ export async function POST(request: Request) {
     const body = (await request.json()) as Record<string, unknown>;
     const action = String(body.action ?? "");
 
+    if (action === "syncAllFunds") {
+      const instruments = await d1
+        .prepare(`SELECT ${instrumentColumns} FROM instruments ORDER BY id`)
+        .all<InstrumentRow>();
+      let synced = 0;
+      for (const instrument of instruments.results) {
+        if (!/^\d{6}$/.test(instrument.code)) continue;
+        try {
+          await syncFundInstrument(d1, instrument.id, instrument.code);
+          synced += 1;
+        } catch {
+          // One unavailable product must not block the rest of the catalog.
+        }
+      }
+      return Response.json({
+        ...(await loadPortfolio()),
+        catalogSync: { synced, total: instruments.results.length },
+      });
+    }
+
     if (action === "lookupFund") {
       return Response.json(await fetchLiveFundData(String(body.code ?? "")));
     }
 
     if (action === "resolveInstrument") {
-      const resolved = await resolveFundInstrument(d1, String(body.code ?? ""));
+      const resolved = await resolveFundInstrument(
+        d1,
+        String(body.code ?? ""),
+        String(body.tradeDate ?? ""),
+      );
       return Response.json(resolved);
     }
 

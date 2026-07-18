@@ -3,7 +3,11 @@ import test from "node:test";
 import { calculatePortfolio, calculateXirr } from "../lib/calculations";
 import { calculateTradingFeeUnits } from "../lib/fees";
 import { calculateFifoRedemptionFeeUnits } from "../lib/fees";
-import { classifyFund, parseFundCategory } from "../lib/fund-data";
+import {
+  classifyFund,
+  parseFundCategory,
+  selectFundNav,
+} from "../lib/fund-data";
 import { classifyMarketNews } from "../lib/market-news";
 import {
   decimalToUnits,
@@ -69,6 +73,18 @@ test("ETF links stay off-exchange funds while listed ETFs are classified correct
     assetClass: "美国股票",
     confirmationBusinessDays: 0,
   });
+});
+
+test("historical fund NAV follows the selected trade date", () => {
+  const points = [
+    { date: "2026-07-16", nav: 1.12 },
+    { date: "2026-07-17", nav: 1.15 },
+    { date: "2026-07-20", nav: 1.18 },
+  ];
+  assert.deepEqual(selectFundNav(points, "2026-07-17"), points[1]);
+  assert.deepEqual(selectFundNav(points, "2026-07-18"), points[1]);
+  assert.equal(selectFundNav(points, "2026-07-01"), null);
+  assert.deepEqual(selectFundNav(points), points[2]);
 });
 
 test("market news is grouped into ETF and overseas sections", () => {
@@ -216,4 +232,82 @@ test("a new deposit does not create TWR profit", () => {
   assert.equal(result.metrics.totalProfit, 0);
   assert.ok(Math.abs(result.metrics.twr) < 1e-12);
   assert.equal(result.metrics.netContributions, 15_000);
+});
+
+test("a trade-only account derives invested capital without negative cash", () => {
+  const accounts: AccountRow[] = [
+    {
+      id: 1,
+      name: "直接买入账户",
+      currency: "CNY",
+      color: "#5B7CFA",
+      cost_method: "MOVING_AVERAGE",
+    },
+  ];
+  const instruments: InstrumentRow[] = [
+    {
+      id: 1,
+      name: "测试基金",
+      code: "000001",
+      market: "CN",
+      asset_class: "中国股票",
+      currency: "CNY",
+      product_type: "FUND",
+      buy_fee_bps: 15,
+      buy_discount_bps: 10_000,
+      sell_fee_bps: 0,
+      min_fee_units: 0,
+      eastmoney_fee_bps: 15,
+      min_purchase_units: 0,
+      redemption_fee_json: "[]",
+      data_source: "TEST",
+      source_updated_at: "",
+    },
+  ];
+  const ledger: LedgerRow[] = [
+    {
+      id: 1,
+      account_id: 1,
+      instrument_id: 1,
+      kind: "BUY",
+      trade_date: "2026-07-15",
+      confirmation_date: "2026-07-16",
+      quantity_units: 1_000 * QUANTITY_SCALE,
+      price_units: 10 * PRICE_SCALE,
+      gross_amount_units: 10_000 * MONEY_SCALE,
+      fee_units: 10 * MONEY_SCALE,
+      tax_units: 0,
+      notes: "",
+      external_ref: "",
+      purchase_channel: "THIRD_PARTY",
+      fee_source: "TEST",
+    },
+  ];
+  const prices: PriceRow[] = [
+    {
+      id: 1,
+      instrument_id: 1,
+      price_date: "2026-07-18",
+      price_units: 9.8 * PRICE_SCALE,
+      source: "TEST",
+    },
+  ];
+
+  const result = calculatePortfolio(
+    accounts,
+    instruments,
+    ledger,
+    prices,
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.netContributions, 10_010);
+  assert.equal(result.metrics.totalAssets, 9_800);
+  assert.equal(result.metrics.totalProfit, -210);
+  assert.equal(result.accounts[0].contributions, 10_010);
+  assert.equal(result.accounts[0].assets, 9_800);
+  assert.equal(result.accounts[0].profit, -210);
+  assert.equal(result.allocation[0].actual, 1);
+  assert.ok(result.allocation.every((item) => item.actual >= 0));
 });

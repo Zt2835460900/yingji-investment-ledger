@@ -17,9 +17,34 @@ export interface LiveFundData {
   minPurchase: number;
   latestNav: number;
   latestNavDate: string;
+  quoteNav: number;
+  quoteNavDate: string;
+  quoteDateRequested: string;
+  quoteIsExact: boolean;
   redemptionTiers: RedemptionFeeTier[];
   source: "EASTMONEY";
   updatedAt: string;
+}
+
+export interface FundNavPoint {
+  date: string;
+  nav: number;
+}
+
+export function selectFundNav(
+  points: FundNavPoint[],
+  requestedDate = "",
+): FundNavPoint | null {
+  const ordered = points
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.nav) &&
+        point.nav > 0,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (!requestedDate) return ordered.at(-1) ?? null;
+  return ordered.findLast((point) => point.date <= requestedDate) ?? null;
 }
 
 const plainText = (value: string) =>
@@ -128,9 +153,13 @@ function parseRedemptionTiers(html: string) {
 
 export async function fetchLiveFundData(
   codeInput: string,
+  quoteDateInput = "",
 ): Promise<LiveFundData> {
   const code = codeInput.trim();
   if (!/^\d{6}$/.test(code)) throw new Error("场外基金代码应为 6 位数字");
+  const quoteDate = quoteDateInput.trim();
+  if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
+    throw new Error("净值查询日期格式不正确");
   const [scriptResponse, feeResponse, profileResponse] = await Promise.all([
     fetch(
       `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
@@ -150,7 +179,8 @@ export async function fetchLiveFundData(
   const name = valueOf(script, "fS_name");
   if (!name) throw new Error("该代码暂无可用基金资料");
   let latestNav = 0;
-  let latestTimestamp = 0;
+  let latestNavDate = "";
+  const navPoints: FundNavPoint[] = [];
   const navStart = script.indexOf("var Data_netWorthTrend");
   const navEnd = navStart >= 0 ? script.indexOf("];", navStart) : -1;
   const navBlock =
@@ -158,9 +188,17 @@ export async function fetchLiveFundData(
       ? script.slice(navStart, navEnd + 1)
       : "";
   for (const match of navBlock.matchAll(/\{"x":(\d+),"y":([\d.]+)/g)) {
-    latestTimestamp = Number(match[1]);
-    latestNav = Number(match[2]);
+    const timestamp = Number(match[1]);
+    const nav = Number(match[2]);
+    const date = timestamp
+      ? new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      : "";
+    if (date && Number.isFinite(nav) && nav > 0) navPoints.push({ date, nav });
   }
+  const latestPoint = selectFundNav(navPoints);
+  const quotePoint = selectFundNav(navPoints, quoteDate);
+  latestNav = latestPoint?.nav ?? 0;
+  latestNavDate = latestPoint?.date ?? "";
   const standardRate = Number(valueOf(script, "fund_sourceRate") || 0);
   const eastmoneyRate = Number(valueOf(script, "fund_Rate") || 0);
   const minPurchase = Number(valueOf(script, "fund_minsg") || 0);
@@ -177,11 +215,11 @@ export async function fetchLiveFundData(
     eastmoneyBuyFeeBps: Math.round(eastmoneyRate * 100),
     minPurchase,
     latestNav,
-    latestNavDate: latestTimestamp
-      ? new Date(latestTimestamp + 8 * 60 * 60 * 1000)
-          .toISOString()
-          .slice(0, 10)
-      : "",
+    latestNavDate,
+    quoteNav: quotePoint?.nav ?? 0,
+    quoteNavDate: quotePoint?.date ?? "",
+    quoteDateRequested: quoteDate,
+    quoteIsExact: Boolean(quoteDate && quotePoint?.date === quoteDate),
     redemptionTiers: parseRedemptionTiers(feeHtml),
     source: "EASTMONEY",
     updatedAt: new Date().toISOString(),

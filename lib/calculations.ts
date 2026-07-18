@@ -91,6 +91,33 @@ export function calculatePortfolio(
     a.price_date.localeCompare(b.price_date),
   );
   const firstDate = orderedLedger[0]?.trade_date ?? today;
+  const explicitCashAccounts = new Set(
+    orderedLedger
+      .filter(
+        (entry) => entry.kind === "DEPOSIT" || entry.kind === "WITHDRAWAL",
+      )
+      .map((entry) => entry.account_id),
+  );
+
+  const investorCashFlow = (entry: LedgerRow): number => {
+    const gross = entry.gross_amount_units / MONEY_SCALE;
+    const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
+    if (explicitCashAccounts.has(entry.account_id)) {
+      if (entry.kind === "DEPOSIT") return -gross;
+      if (entry.kind === "WITHDRAWAL") return gross;
+      return 0;
+    }
+    if (entry.kind === "BUY") return -(gross + fee);
+    if (entry.kind === "SELL") return gross - fee;
+    if (entry.kind === "DIVIDEND") return gross - fee;
+    if (entry.kind === "FEE") return -gross;
+    return 0;
+  };
+
+  const contributionForAccount = (accountId: number): number =>
+    -orderedLedger
+      .filter((entry) => entry.account_id === accountId)
+      .reduce((sum, entry) => sum + investorCashFlow(entry), 0);
 
   const cashByAccount = new Map<number, number>();
   const positions = new Map<
@@ -194,12 +221,21 @@ export function calculatePortfolio(
     (sum, item) => sum + item.marketValue,
     0,
   );
-  const cash = [...cashByAccount.values()].reduce(
+  // Accounts with explicit deposits/withdrawals retain their cash balance.
+  // For trade-only accounts, buys and sells are treated as external investor
+  // cash flows so a direct BUY entry never creates a fictitious negative cash
+  // balance or a zero contribution amount.
+  const cash = [...cashByAccount.entries()]
+    .filter(([accountId]) => explicitCashAccounts.has(accountId))
+    .reduce((sum, [, value]) => sum + value, 0);
+  const totalAssets = securitiesValue + cash;
+  const contributionByAccount = new Map(
+    accounts.map((account) => [account.id, contributionForAccount(account.id)]),
+  );
+  const netContributions = [...contributionByAccount.values()].reduce(
     (sum, value) => sum + value,
     0,
   );
-  const totalAssets = securitiesValue + cash;
-  const netContributions = deposits - withdrawals;
   const totalProfit = totalAssets - netContributions;
   const unrealized = holdings.reduce((sum, item) => sum + item.unrealized, 0);
 
@@ -244,6 +280,7 @@ export function calculatePortfolio(
       const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
       const quantity = entry.quantity_units / QUANTITY_SCALE;
       const currentCash = simCash.get(entry.account_id) ?? 0;
+      const usesExplicitCash = explicitCashAccounts.has(entry.account_id);
       const key = `${entry.account_id}:${entry.instrument_id ?? 0}`;
       if (entry.kind === "DEPOSIT") {
         externalFlow += gross;
@@ -255,14 +292,34 @@ export function calculatePortfolio(
         simCash.set(entry.account_id, currentCash - gross);
       } else if (entry.kind === "BUY") {
         simQty.set(key, (simQty.get(key) ?? 0) + quantity);
-        simCash.set(entry.account_id, currentCash - gross - fee);
+        if (usesExplicitCash) {
+          simCash.set(entry.account_id, currentCash - gross - fee);
+        } else {
+          externalFlow += gross + fee;
+          cumulativeContributions += gross + fee;
+        }
       } else if (entry.kind === "SELL") {
         simQty.set(key, Math.max(0, (simQty.get(key) ?? 0) - quantity));
-        simCash.set(entry.account_id, currentCash + gross - fee);
+        if (usesExplicitCash) {
+          simCash.set(entry.account_id, currentCash + gross - fee);
+        } else {
+          externalFlow -= gross - fee;
+          cumulativeContributions -= gross - fee;
+        }
       } else if (entry.kind === "DIVIDEND") {
-        simCash.set(entry.account_id, currentCash + gross - fee);
+        if (usesExplicitCash) {
+          simCash.set(entry.account_id, currentCash + gross - fee);
+        } else {
+          externalFlow -= gross - fee;
+          cumulativeContributions -= gross - fee;
+        }
       } else if (entry.kind === "FEE") {
-        simCash.set(entry.account_id, currentCash - gross);
+        if (usesExplicitCash) {
+          simCash.set(entry.account_id, currentCash - gross);
+        } else {
+          externalFlow += gross;
+          cumulativeContributions += gross;
+        }
       }
     }
     const simulatedCash = [...simCash.values()].reduce(
@@ -337,13 +394,11 @@ export function calculatePortfolio(
   }));
 
   const cashFlows = orderedLedger
-    .filter((entry) => entry.kind === "DEPOSIT" || entry.kind === "WITHDRAWAL")
     .map((entry) => ({
       date: entry.trade_date,
-      value:
-        ((entry.kind === "DEPOSIT" ? -1 : 1) * entry.gross_amount_units) /
-        MONEY_SCALE,
-    }));
+      value: investorCashFlow(entry),
+    }))
+    .filter((entry) => entry.value !== 0);
   cashFlows.push({ date: today, value: totalAssets });
   const personalXirr = calculateXirr(
     cashFlows.sort((a, b) => a.date.localeCompare(b.date)),
@@ -355,69 +410,59 @@ export function calculatePortfolio(
     );
     const accountAssets =
       accountHoldings.reduce((sum, item) => sum + item.marketValue, 0) +
-      (cashByAccount.get(account.id) ?? 0);
-    const accountDeposit = ledger
-      .filter(
-        (entry) => entry.account_id === account.id && entry.kind === "DEPOSIT",
-      )
-      .reduce((sum, entry) => sum + entry.gross_amount_units / MONEY_SCALE, 0);
-    const accountWithdrawal = ledger
-      .filter(
-        (entry) =>
-          entry.account_id === account.id && entry.kind === "WITHDRAWAL",
-      )
-      .reduce((sum, entry) => sum + entry.gross_amount_units / MONEY_SCALE, 0);
-    const net = accountDeposit - accountWithdrawal;
+      (explicitCashAccounts.has(account.id)
+        ? (cashByAccount.get(account.id) ?? 0)
+        : 0);
+    const net = contributionByAccount.get(account.id) ?? 0;
+    const accountCashFlows = orderedLedger
+      .filter((entry) => entry.account_id === account.id)
+      .map((entry) => ({
+        date: entry.trade_date,
+        value: investorCashFlow(entry),
+      }))
+      .filter((entry) => entry.value !== 0);
     return {
       ...account,
       assets: accountAssets,
       contributions: net,
       profit: accountAssets - net,
       returnRate: calculateXirr(
-        [
-          ...ledger
-            .filter(
-              (entry) =>
-                entry.account_id === account.id &&
-                (entry.kind === "DEPOSIT" || entry.kind === "WITHDRAWAL"),
-            )
-            .map((entry) => ({
-              date: entry.trade_date,
-              value:
-                (entry.kind === "DEPOSIT" ? -1 : 1) *
-                (entry.gross_amount_units / MONEY_SCALE),
-            })),
-          { date: today, value: accountAssets },
-        ].sort((a, b) => a.date.localeCompare(b.date)),
+        [...accountCashFlows, { date: today, value: accountAssets }].sort(
+          (a, b) => a.date.localeCompare(b.date),
+        ),
       ),
     };
   });
 
-  const allocation = holdings.map((item) => {
-    const target = targets.find(
-      (targetRow) => targetRow.instrument_id === item.instrumentId,
-    );
-    const actual = totalAssets ? item.marketValue / totalAssets : 0;
-    const targetRate = (target?.target_bps ?? 0) / 10_000;
-    const drift = actual - targetRate;
-    return {
-      instrumentId: item.instrumentId,
-      name: item.instrumentName,
-      value: item.marketValue,
-      actual,
-      target: targetRate,
-      drift,
-      alert: Math.abs(drift) * 10_000 > (target?.alert_bps ?? 500),
-    };
-  });
-  if (cash > 0)
+  const allocatableCash = Math.max(0, cash);
+  const allocationBase = securitiesValue + allocatableCash;
+  const allocation = holdings
+    .filter((item) => item.marketValue > 0)
+    .map((item) => {
+      const target = targets.find(
+        (targetRow) => targetRow.instrument_id === item.instrumentId,
+      );
+      const actual = allocationBase ? item.marketValue / allocationBase : 0;
+      const targetRate = (target?.target_bps ?? 0) / 10_000;
+      const drift = actual - targetRate;
+      return {
+        instrumentId: item.instrumentId,
+        name: item.instrumentName,
+        value: item.marketValue,
+        actual,
+        target: targetRate,
+        drift,
+        alert: Math.abs(drift) * 10_000 > (target?.alert_bps ?? 500),
+      };
+    });
+  if (allocatableCash > 0)
     allocation.push({
       instrumentId: 0,
       name: "现金",
-      value: cash,
-      actual: totalAssets ? cash / totalAssets : 0,
+      value: allocatableCash,
+      actual: allocationBase ? allocatableCash / allocationBase : 0,
       target: 0,
-      drift: totalAssets ? cash / totalAssets : 0,
+      drift: allocationBase ? allocatableCash / allocationBase : 0,
       alert: false,
     });
 

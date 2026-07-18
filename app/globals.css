@@ -10,6 +10,8 @@
   --blue-dark: #405ec9;
   --green: #159b72;
   --red: #dc6670;
+  --profit: #de4f5f;
+  --loss: #159b72;
   --amber: #e99a31;
   --shadow: 0 12px 36px rgba(35, 48, 82, 0.07);
 }
@@ -42,10 +44,10 @@ select:focus-visible {
   outline-offset: 2px;
 }
 .up {
-  color: var(--green) !important;
+  color: var(--profit) !important;
 }
 .down {
-  color: var(--red) !important;
+  color: var(--loss) !important;
 }
 
 .app-shell {
@@ -380,12 +382,18 @@ select:focus-visible {
   background: #f1f3f8;
 }
 .metric-card.positive .metric-icon {
-  color: var(--green);
-  background: #eaf7f2;
+  color: var(--profit);
+  background: #fff0f1;
 }
 .metric-card.negative .metric-icon {
-  color: var(--red);
-  background: #fff0f1;
+  color: var(--loss);
+  background: #eaf7f2;
+}
+.metric-card.positive > strong {
+  color: var(--profit);
+}
+.metric-card.negative > strong {
+  color: var(--loss);
 }
 .metric-card > strong {
   display: block;
@@ -511,7 +519,7 @@ select:focus-visible {
   gap: 10px;
   min-width: 0;
 }
-.allocation-legend div,
+.allocation-legend > div,
 .allocation-summary-list div {
   display: flex;
   gap: 7px;
@@ -534,6 +542,23 @@ select:focus-visible {
 .allocation-summary-list strong {
   margin-left: auto;
   font-size: 10px;
+}
+.allocation-legend-value {
+  margin-left: auto;
+  display: grid;
+  gap: 1px;
+  text-align: right;
+  white-space: nowrap;
+}
+.allocation-legend-value strong {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+}
+.allocation-legend-value small {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 .account-list {
   display: grid;
@@ -571,6 +596,29 @@ select:focus-visible {
 }
 .monthly-panel {
   grid-column: 1 / -1;
+}
+.monthly-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.monthly-summary > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  border: 1px solid #edf0f5;
+  border-radius: 11px;
+  background: #fafbfc;
+}
+.monthly-summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.monthly-summary strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
 }
 
 .stack-page {
@@ -653,12 +701,12 @@ select:focus-visible {
   font-weight: 650;
 }
 .account-profit-status.profit {
-  color: #157657;
-  background: #e9f8f2;
+  color: #b93645;
+  background: #fff0f1;
 }
 .account-profit-status.loss {
-  color: #b63e49;
-  background: #fff0f1;
+  color: #147557;
+  background: #e9f8f2;
 }
 .account-profit-status.flat {
   color: #6f7788;
@@ -694,6 +742,30 @@ select:focus-visible {
   margin: 0;
   color: var(--muted);
   font-size: 9.5px;
+}
+.account-source-line {
+  margin-bottom: 8px !important;
+}
+.account-auto-type {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.account-auto-type span,
+.account-auto-type strong {
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.account-auto-type span {
+  color: #526dcc;
+  background: #eef2ff;
+}
+.account-auto-type strong {
+  color: #526077;
+  background: #f0f3f7;
 }
 .account-card > strong {
   display: block;
@@ -1255,6 +1327,7 @@ td small {
   padding: 0 8px;
 }
 .market-news-panel {
+  order: 10;
   padding: 24px;
   overflow: hidden;
 }
@@ -1518,7 +1591,7 @@ td small {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: conic-gradient(var(--green) var(--win), #ebeef3 0);
+  background: conic-gradient(var(--profit) var(--win), #ebeef3 0);
   position: relative;
 }
 .win-ring::after {
@@ -2439,6 +2512,10 @@ body {
 .audit-list strong {
   font-size: 14px;
 }
+.account-auto-type span,
+.account-auto-type strong {
+  font-size: 13px;
+}
 .filter-pills button {
   min-height: 36px;
   font-size: 14px;
@@ -2627,5 +2704,267 @@ button:disabled {
   .add-account-card,
   .add-plan-card {
     min-height: 0;
+  }
+}
+
+/* Unified large-type scale for the Chinese financial interface. */
+body {
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+.brand strong {
+  font-size: 21px;
+}
+.brand small,
+.sidebar-status p {
+  font-size: 13px;
+}
+.sidebar-status > div,
+.sidebar nav button,
+.settings-link {
+  font-size: 16px;
+}
+.topbar h1 {
+  font-size: 25px;
+}
+.topbar p,
+.valuation-pill {
+  font-size: 15px;
+}
+.eyebrow,
+.hero-cashflow span,
+.hero-stats span {
+  font-size: 14px;
+}
+.hero-stats strong {
+  font-size: 18px;
+}
+.primary-button,
+.secondary-button,
+.ghost-button {
+  font-size: 15px;
+}
+.panel-title h2 {
+  font-size: 19px;
+}
+.panel-title p,
+.panel-title > span {
+  font-size: 14px;
+}
+.metric-top,
+.metric-top span,
+.metric-card small {
+  font-size: 14px;
+}
+.metric-card > strong {
+  font-size: 24px;
+}
+.recharts-text {
+  font-size: 13px;
+}
+.chart-tooltip,
+.chart-tooltip > span {
+  font-size: 13px;
+}
+.donut span,
+.big-donut > div:last-child span {
+  font-size: 13px;
+}
+.allocation-legend > div,
+.allocation-summary-list div {
+  font-size: 14px;
+}
+.allocation-legend span {
+  font-size: 13px;
+}
+.allocation-legend-value strong {
+  font-size: 14px;
+}
+.allocation-legend-value small {
+  font-size: 12px;
+}
+.account-row {
+  grid-template-columns: 8px 1fr auto;
+  gap: 13px;
+  padding: 15px 0;
+}
+.account-row > i {
+  width: 8px;
+  height: 38px;
+}
+.account-row strong {
+  font-size: 15px;
+}
+.account-row > div:last-child > strong {
+  font-size: 17px;
+}
+.account-row span {
+  font-size: 13px;
+}
+.account-card,
+.plan-card,
+.add-account-card,
+.add-plan-card {
+  min-height: 300px;
+}
+.account-card h2,
+.plan-card h2,
+.data-card h2 {
+  font-size: 19px;
+}
+.account-card > p,
+.plan-card > p,
+.data-card p,
+.mini-holdings,
+.plan-summary span,
+.plan-summary p,
+.plan-amount span,
+.plan-date span,
+.plan-progress small,
+.allocation-hero p,
+.audit-list p {
+  font-size: 14px;
+}
+.account-card > strong,
+.plan-amount strong {
+  font-size: 27px;
+}
+.account-card-stats span,
+.target-name span,
+.target-bar small,
+.target-row > label,
+.ranking-list span,
+.risk-numbers span {
+  font-size: 14px;
+}
+.account-card-stats b,
+.plan-date strong,
+.target-name strong,
+.ranking-list strong,
+.risk-numbers strong,
+.audit-list strong {
+  font-size: 16px;
+}
+.ledger-summary > div > span:not(.ledger-summary-icon) {
+  font-size: 14px;
+}
+.ledger-summary strong {
+  font-size: 20px;
+}
+.search-box input,
+.filter-pills button {
+  font-size: 15px;
+}
+th {
+  font-size: 14px;
+}
+td,
+td strong {
+  font-size: 15px;
+}
+td small {
+  font-size: 13px;
+}
+.kind-badge,
+.status-badge,
+.account-profit-status {
+  font-size: 13px;
+}
+.market-news-title-line h2 {
+  font-size: 22px;
+}
+.market-news-heading p,
+.market-news-card h3 {
+  font-size: 15px;
+}
+.market-news-card > p,
+.news-card-meta time,
+.news-card-source,
+.news-disclaimer {
+  font-size: 13px;
+}
+.news-card-meta span,
+.news-live-badge {
+  font-size: 12px;
+}
+.rank {
+  font-size: 14px;
+}
+.form-grid label > span {
+  font-size: 15px;
+}
+.form-grid input,
+.form-grid select {
+  min-height: 50px;
+  font-size: 16px;
+}
+.form-grid small,
+.form-note {
+  font-size: 13.5px;
+}
+.segmented button {
+  min-height: 44px;
+  font-size: 14px;
+}
+.modal-head h2 {
+  font-size: 24px;
+}
+
+@media (max-width: 680px) {
+  body {
+    font-size: 16px;
+  }
+  .topbar h1 {
+    font-size: 20px;
+  }
+  .panel-title h2 {
+    font-size: 18px;
+  }
+  .panel-title p,
+  .panel-title > span {
+    font-size: 13px;
+  }
+  .metric-card > strong {
+    font-size: 19px;
+  }
+  .metric-top,
+  .metric-top span,
+  .metric-card small {
+    font-size: 13px;
+  }
+  .monthly-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .monthly-summary span {
+    font-size: 13px;
+  }
+  .monthly-summary strong {
+    font-size: 14px;
+  }
+  .account-row strong {
+    font-size: 14px;
+  }
+  .account-row > div:last-child > strong {
+    font-size: 15px;
+  }
+  .account-row span {
+    font-size: 12px;
+  }
+  .recharts-text {
+    font-size: 11px;
+  }
+  .account-card,
+  .plan-card,
+  .add-account-card,
+  .add-plan-card {
+    min-height: 0;
+  }
+  th {
+    font-size: 13px;
+  }
+  td,
+  td strong {
+    font-size: 14px;
   }
 }

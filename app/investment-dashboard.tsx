@@ -219,6 +219,8 @@ const COLORS = [
   "#EF6A72",
   "#6BC5D2",
 ];
+const PROFIT_COLOR = "#DE4F5F";
+const LOSS_COLOR = "#159B72";
 const kindLabels: Record<string, string> = {
   DEPOSIT: "入金",
   WITHDRAWAL: "出金",
@@ -265,7 +267,17 @@ const addBusinessDays = (dateTextValue: string, businessDays: number) => {
 const matchingAccount = (
   accounts: PortfolioData["accounts"],
   instrument: PortfolioData["instruments"][number],
+  holdings: PortfolioData["holdings"] = [],
 ) => {
+  const existingHolding = holdings.find(
+    (holding) => holding.instrumentId === instrument.id,
+  );
+  if (existingHolding) {
+    const existingAccount = accounts.find(
+      (account) => account.id === existingHolding.accountId,
+    );
+    if (existingAccount) return existingAccount;
+  }
   const product = `${instrument.name} ${instrument.asset_class}`;
   const exactKeywords = ["纳斯达克", "标普", "恒生", "黄金", "债券"];
   for (const keyword of exactKeywords) {
@@ -395,6 +407,7 @@ export function InvestmentDashboard() {
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const catalogSyncStarted = useRef(false);
   const navigateView = (next: View) => {
     setView(next);
     window.history.replaceState(null, "", `#${next}`);
@@ -409,6 +422,23 @@ export function InvestmentDashboard() {
       };
       if (!response.ok) throw new Error(result.error || "读取失败");
       setData(result);
+      if (!catalogSyncStarted.current) {
+        catalogSyncStarted.current = true;
+        void fetch("/api/portfolio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "syncAllFunds" }),
+        })
+          .then(async (syncResponse) => {
+            const synced = (await syncResponse.json()) as PortfolioData & {
+              error?: string;
+            };
+            if (syncResponse.ok) setData(synced);
+          })
+          .catch(() => {
+            // Keep locally stored names and types when the public source is down.
+          });
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "读取失败");
     }
@@ -655,6 +685,20 @@ function Overview({
 }) {
   const m = data.metrics;
   const recentSeries = data.series.slice(-120);
+  const monthlyTotal = data.monthly.reduce((sum, item) => sum + item.profit, 0);
+  const currentMonthProfit = data.monthly.at(-1)?.profit ?? 0;
+  const profitableMonths = data.monthly.filter(
+    (item) => item.profit > 0,
+  ).length;
+  const lossMonths = data.monthly.filter((item) => item.profit < 0).length;
+  const monthlyAbsMax = Math.max(
+    1,
+    ...data.monthly.map((item) => Math.abs(item.profit)),
+  );
+  const monthlyDomain: [number, number] = [
+    -monthlyAbsMax * 1.18,
+    monthlyAbsMax * 1.18,
+  ];
   return (
     <div className="page-grid overview-page">
       <section className="hero-balance">
@@ -665,7 +709,7 @@ function Overview({
             <div className="hero-cashflow" aria-label="资金概览">
               <span>累计入金 ¥{money(m.deposits)}</span>
               <span>累计出金 ¥{money(m.withdrawals)}</span>
-              <span>现金已计入总资产</span>
+              <span>直接买入会自动计入投入本金</span>
             </div>
           </div>
           <button className="ghost-button" onClick={onEntry}>
@@ -809,7 +853,7 @@ function Overview({
       <section className="panel allocation-panel">
         <PanelTitle
           title="当前配置"
-          subtitle="按产品市值"
+          subtitle="按正的持仓市值计算，不受追加资金影响"
           action={`${data.allocation.filter((x) => x.alert).length} 项偏离`}
         />
         <div className="allocation-chart-wrap">
@@ -840,7 +884,10 @@ function Overview({
               <div key={item.name}>
                 <i style={{ background: COLORS[index % COLORS.length] }} />
                 <span>{item.name}</span>
-                <strong>{(item.actual * 100).toFixed(1)}%</strong>
+                <div className="allocation-legend-value">
+                  <strong>{(item.actual * 100).toFixed(1)}%</strong>
+                  <small>¥{money(item.value, 0)}</small>
+                </div>
               </div>
             ))}
           </div>
@@ -858,7 +905,7 @@ function Overview({
               <i style={{ background: account.color }} />
               <div>
                 <strong>{account.name}</strong>
-                <span>净投入 ¥{money(account.contributions, 0)}</span>
+                <span>累计净投入 ¥{money(account.contributions, 0)}</span>
               </div>
               <div>
                 <strong>¥{money(account.assets)}</strong>
@@ -874,9 +921,31 @@ function Overview({
       <section className="panel monthly-panel">
         <PanelTitle
           title="月度盈亏"
-          subtitle="绝对盈亏金额"
+          subtitle="以零轴为中心，红色盈利、绿色亏损"
           action="近 12 月"
         />
+        <div className="monthly-summary" aria-label="月度盈亏摘要">
+          <div>
+            <span>本月盈亏</span>
+            <strong className={currentMonthProfit >= 0 ? "up" : "down"}>
+              {currentMonthProfit >= 0 ? "+" : ""}¥{money(currentMonthProfit)}
+            </strong>
+          </div>
+          <div>
+            <span>近 12 月合计</span>
+            <strong className={monthlyTotal >= 0 ? "up" : "down"}>
+              {monthlyTotal >= 0 ? "+" : ""}¥{money(monthlyTotal)}
+            </strong>
+          </div>
+          <div>
+            <span>盈利月份</span>
+            <strong className="up">{profitableMonths} 个月</strong>
+          </div>
+          <div>
+            <span>亏损月份</span>
+            <strong className="down">{lossMonths} 个月</strong>
+          </div>
+        </div>
         <div className="chart-sm">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.monthly}>
@@ -887,18 +956,19 @@ function Overview({
               />
               <XAxis dataKey="month" tickLine={false} axisLine={false} />
               <YAxis
+                domain={monthlyDomain}
                 tickFormatter={compactMoney}
                 tickLine={false}
                 axisLine={false}
                 width={42}
               />
               <Tooltip content={<ChartTooltip />} />
-              <ReferenceLine y={0} stroke="#C9CED9" />
+              <ReferenceLine y={0} stroke="#AAB2C1" strokeWidth={1.3} />
               <Bar name="月度盈亏" dataKey="profit" radius={[5, 5, 2, 2]}>
                 {data.monthly.map((item, i) => (
                   <Cell
                     key={i}
-                    fill={item.profit >= 0 ? "#55B99A" : "#EF7C83"}
+                    fill={item.profit >= 0 ? PROFIT_COLOR : LOSS_COLOR}
                   />
                 ))}
               </Bar>
@@ -1042,13 +1112,20 @@ function Accounts({
                 </div>
               </div>
               <h2>{primaryPosition?.instrumentName ?? account.name}</h2>
-              <p>
-                {primaryPosition
-                  ? `账户：${account.name} · ${primaryPosition.code} · ${productTypeLabel(
-                      primaryInstrument,
-                    )} · ${primaryInstrument?.asset_class ?? "其他"}`
-                  : `基准币种 ${account.currency} · 移动加权成本`}
-              </p>
+              {primaryPosition ? (
+                <>
+                  <p className="account-source-line">
+                    归属账户：{account.name} · 代码 {primaryPosition.code}
+                  </p>
+                  <div className="account-auto-type">
+                    <span>代码自动识别</span>
+                    <strong>{productTypeLabel(primaryInstrument)}</strong>
+                    <strong>{primaryInstrument?.asset_class ?? "其他"}</strong>
+                  </div>
+                </>
+              ) : (
+                <p>基准币种 {account.currency} · 暂无持仓类型</p>
+              )}
               <strong>¥ {money(account.assets)}</strong>
               <div className="account-card-stats">
                 <div>
@@ -1850,7 +1927,7 @@ function Analytics({ data }: { data: PortfolioData }) {
                 name="回撤"
                 dataKey="drawdown"
                 type="monotone"
-                stroke="#EF7C83"
+                stroke={LOSS_COLOR}
                 strokeWidth={1.8}
                 dot={false}
               />
@@ -2310,7 +2387,7 @@ function ModalForm({
     ? data.instruments.find((item) => item.id === editingPlan.instrument_id)
     : data.instruments[0];
   const initialPlanAccount = initialPlanInstrument
-    ? matchingAccount(data.accounts, initialPlanInstrument)
+    ? matchingAccount(data.accounts, initialPlanInstrument, data.holdings)
     : null;
   const [form, setForm] = useState<Record<string, string>>({
     kind: "BUY",
@@ -2360,6 +2437,8 @@ function ModalForm({
   const [quoteMeta, setQuoteMeta] = useState<{
     price: number;
     date: string;
+    requestedDate: string;
+    isExact: boolean;
     isLive: boolean;
   } | null>(null);
   const [confirmationBusinessDays, setConfirmationBusinessDays] = useState<
@@ -2403,18 +2482,27 @@ function ModalForm({
           setLookupNote(code ? "请输入完整的 6 位基金或 ETF 代码" : "");
           return;
         }
+        setPriceIsAuto(true);
         setLookupBusy(true);
-        setLookupNote("正在自动匹配真实基金数据…");
+        setLookupNote(`正在匹配基金资料及 ${form.tradeDate} 对应净值…`);
         try {
           const response = await fetch("/api/portfolio", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "resolveInstrument", code }),
+            body: JSON.stringify({
+              action: "resolveInstrument",
+              code,
+              tradeDate: form.tradeDate,
+            }),
             signal: controller.signal,
           });
           const result = (await response.json()) as {
             error?: string;
             instrument?: PortfolioData["instruments"][number];
+            quoteNav?: number;
+            quoteNavDate?: string;
+            quoteDateRequested?: string;
+            quoteIsExact?: boolean;
             latestNav?: number;
             latestNavDate?: string;
             fundCategory?: string;
@@ -2431,15 +2519,21 @@ function ModalForm({
               (result.instrument.product_type === "ETF" ? 0 : 1),
           );
           setQuoteMeta(
-            result.latestNav && result.latestNavDate
+            result.quoteNav && result.quoteNavDate
               ? {
-                  price: result.latestNav,
-                  date: result.latestNavDate,
+                  price: result.quoteNav,
+                  date: result.quoteNavDate,
+                  requestedDate: result.quoteDateRequested ?? form.tradeDate,
+                  isExact: result.quoteIsExact === true,
                   isLive: result.isLive !== false,
                 }
               : null,
           );
-          const account = matchingAccount(data.accounts, result.instrument);
+          const account = matchingAccount(
+            data.accounts,
+            result.instrument,
+            data.holdings,
+          );
           setForm((current) =>
             current.instrumentCode === code
               ? {
@@ -2449,9 +2543,7 @@ function ModalForm({
                     current.kind === "BUY" && account
                       ? String(account.id)
                       : current.accountId,
-                  price: result.latestNav
-                    ? String(result.latestNav)
-                    : current.price,
+                  price: result.quoteNav ? String(result.quoteNav) : "",
                   fee: "",
                   tax:
                     ["FUND", "ETF"].includes(
@@ -2463,7 +2555,7 @@ function ModalForm({
               : current,
           );
           setLookupNote(
-            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${account ? `；账户已匹配为 ${account.name}` : ""}`,
+            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : `；${form.tradeDate} 之前暂无公开净值`}${account ? `；账户已匹配为 ${account.name}` : ""}`,
           );
         } catch (caught) {
           if (!controller.signal.aborted)
@@ -2480,7 +2572,15 @@ function ModalForm({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [data.accounts, data.instruments, form.instrumentCode, form.kind, type]);
+  }, [
+    data.accounts,
+    data.holdings,
+    data.instruments,
+    form.instrumentCode,
+    form.kind,
+    form.tradeDate,
+    type,
+  ]);
   const calculatedAmount = Number(form.quantity || 0) * Number(form.price || 0);
   const grossPreview = amountIsAuto
     ? calculatedAmount
@@ -2828,10 +2928,12 @@ function ModalForm({
                       />
                       <small>
                         {quoteMeta && priceIsAuto
-                          ? `已带入最新可用净值 ${quoteMeta.price.toFixed(6)}（${quoteMeta.date}${quoteMeta.date === form.tradeDate ? "，当日" : "，非当前交易日"}${quoteMeta.isLive ? "" : "，缓存"}）；实际确认净值可覆盖`
+                          ? `已按所选交易日期带入净值 ${quoteMeta.price.toFixed(6)}（${quoteMeta.date}${quoteMeta.isExact ? "，当日公布" : `，${quoteMeta.requestedDate} 前最近公布`}${quoteMeta.isLive ? "" : "，缓存"}）；成交确认单可覆盖`
                           : quoteMeta
-                            ? "已使用手工净值；重新输入代码可恢复自动带入"
-                            : "匹配代码后自动带入最新可用净值"}
+                            ? "已使用手工净值；重新选择交易日期或输入代码可恢复自动带入"
+                            : selectedInstrument && !lookupBusy
+                              ? `所选日期 ${form.tradeDate} 之前暂无公开净值，请按成交确认单填写`
+                              : "输入代码后按所选交易日期自动匹配历史净值"}
                       </small>
                     </Field>
                   </>
@@ -2900,7 +3002,7 @@ function ModalForm({
                 <ShieldCheck size={17} />
                 <span>
                   系统按产品费率自动估算手续费，真实成交后可用账单金额覆盖；费用会计入成本、
-                  已实现收益和总收益。只有入金和出金作为外部现金流影响 XIRR。
+                  已实现收益和总收益。有入金记录时按账户现金核算；只有交易记录时，买卖资金会自动换算为投入与回款。
                 </span>
               </div>
             </>
@@ -3096,7 +3198,11 @@ function ModalForm({
                       (item) => item.id === Number(e.target.value),
                     );
                     const account = instrument
-                      ? matchingAccount(data.accounts, instrument)
+                      ? matchingAccount(
+                          data.accounts,
+                          instrument,
+                          data.holdings,
+                        )
                       : null;
                     setForm((current) => ({
                       ...current,
