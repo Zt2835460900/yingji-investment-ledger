@@ -38,7 +38,7 @@ async function syncFundInstrument(
   const live = await fetchLiveFundData(code, quoteDate);
   await d1
     .prepare(
-      "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+      "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ?",
     )
     .bind(
       live.name,
@@ -47,6 +47,7 @@ async function syncFundInstrument(
       live.standardBuyFeeBps,
       live.eastmoneyBuyFeeBps,
       decimalToUnits(live.minPurchase),
+      live.redemptionFeeAvailable ? 1 : 0,
       JSON.stringify(live.redemptionTiers),
       live.source,
       live.updatedAt,
@@ -413,7 +414,7 @@ export async function POST(request: Request) {
             const live = await fetchLiveFundData(instrument.code);
             await d1
               .prepare(
-                "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+                "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ?",
               )
               .bind(
                 live.name,
@@ -422,6 +423,7 @@ export async function POST(request: Request) {
                 live.standardBuyFeeBps,
                 live.eastmoneyBuyFeeBps,
                 decimalToUnits(live.minPurchase),
+                live.redemptionFeeAvailable ? 1 : 0,
                 JSON.stringify(live.redemptionTiers),
                 live.source,
                 live.updatedAt,
@@ -443,7 +445,9 @@ export async function POST(request: Request) {
               ...instrument,
               buy_fee_bps: live.standardBuyFeeBps,
               eastmoney_fee_bps: live.eastmoneyBuyFeeBps,
-              redemption_fee_json: JSON.stringify(live.redemptionTiers),
+              redemption_fee_json: live.redemptionFeeAvailable
+                ? JSON.stringify(live.redemptionTiers)
+                : instrument.redemption_fee_json,
             };
           } catch {
             // Keep the last synchronized rules when the external source is unavailable.

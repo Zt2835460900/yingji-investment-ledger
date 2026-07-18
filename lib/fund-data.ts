@@ -22,6 +22,8 @@ export interface LiveFundData {
   quoteDateRequested: string;
   quoteIsExact: boolean;
   redemptionTiers: RedemptionFeeTier[];
+  redemptionFeeAvailable: boolean;
+  profileDataAvailable: boolean;
   source: "EASTMONEY";
   updatedAt: string;
 }
@@ -161,7 +163,7 @@ export async function fetchLiveFundData(
   if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
     throw new Error("净值查询日期格式不正确");
   const signal = AbortSignal.timeout(10_000);
-  const [scriptResponse, feeResponse, profileResponse] = await Promise.all([
+  const [scriptResult, feeResult, profileResult] = await Promise.allSettled([
     fetch(
       `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
       {
@@ -178,6 +180,12 @@ export async function fetchLiveFundData(
       signal,
     }),
   ]);
+  if (scriptResult.status !== "fulfilled")
+    throw new Error("基金净值数据源暂时不可用");
+  const scriptResponse = scriptResult.value;
+  const feeResponse = feeResult.status === "fulfilled" ? feeResult.value : null;
+  const profileResponse =
+    profileResult.status === "fulfilled" ? profileResult.value : null;
   if (!scriptResponse.ok) throw new Error("未查询到该基金代码");
   const script = await scriptResponse.text();
   const name = valueOf(script, "fS_name");
@@ -206,8 +214,8 @@ export async function fetchLiveFundData(
   const standardRate = Number(valueOf(script, "fund_sourceRate") || 0);
   const eastmoneyRate = Number(valueOf(script, "fund_Rate") || 0);
   const minPurchase = Number(valueOf(script, "fund_minsg") || 0);
-  const feeHtml = feeResponse.ok ? await feeResponse.text() : "";
-  const profileHtml = profileResponse.ok ? await profileResponse.text() : "";
+  const feeHtml = feeResponse?.ok ? await feeResponse.text() : "";
+  const profileHtml = profileResponse?.ok ? await profileResponse.text() : "";
   const fundCategory = parseFundCategory(profileHtml);
   const classification = classifyFund(code, name, fundCategory);
   return {
@@ -225,6 +233,8 @@ export async function fetchLiveFundData(
     quoteDateRequested: quoteDate,
     quoteIsExact: Boolean(quoteDate && quotePoint?.date === quoteDate),
     redemptionTiers: parseRedemptionTiers(feeHtml),
+    redemptionFeeAvailable: feeResponse?.ok === true,
+    profileDataAvailable: profileResponse?.ok === true,
     source: "EASTMONEY",
     updatedAt: new Date().toISOString(),
   };
