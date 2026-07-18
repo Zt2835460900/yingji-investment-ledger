@@ -1,0 +1,2 @@
+CREATE INDEX `ledger_account_date_idx` ON `ledger_entries` (`account_id`,`trade_date`);--> statement-breakpoint
+CREATE UNIQUE INDEX `ledger_external_ref_idx` ON `ledger_entries` (`external_ref`) WHERE "ledger_entries"."external_ref" <> '';
