@@ -1,0 +1,1 @@
+ALTER TABLE `ledger_entries` ADD `confirmation_date` text DEFAULT '' NOT NULL;
