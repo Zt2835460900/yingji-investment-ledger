@@ -188,13 +188,39 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+function hasTrustedWriteOrigin(request: Request) {
   const origin = request.headers.get("origin");
+  if (origin === null) return true;
+  try {
+    const requestUrl = new URL(request.url);
+    const publicHost = (
+      request.headers.get("x-forwarded-host") ??
+      request.headers.get("host") ??
+      requestUrl.host
+    )
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    const publicProtocol = (
+      request.headers.get("x-forwarded-proto") ??
+      requestUrl.protocol.replace(":", "")
+    )
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    const originUrl = new URL(origin);
+    return (
+      originUrl.host.toLowerCase() === publicHost &&
+      originUrl.protocol.toLowerCase() === `${publicProtocol}:`
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function POST(request: Request) {
   const fetchSite = request.headers.get("sec-fetch-site");
-  if (
-    fetchSite === "cross-site" ||
-    (origin !== null && origin !== new URL(request.url).origin)
-  ) {
+  if (fetchSite === "cross-site" || !hasTrustedWriteOrigin(request)) {
     return Response.json({ error: "拒绝跨站数据操作" }, { status: 403 });
   }
 
