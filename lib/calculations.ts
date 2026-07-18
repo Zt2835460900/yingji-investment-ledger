@@ -10,6 +10,19 @@ import type {
 
 const DAY = 86_400_000;
 
+function shanghaiDate(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
 function dateRange(start: string, end: string): string[] {
   const values: string[] = [];
   for (
@@ -81,7 +94,7 @@ export function calculatePortfolio(
   plans: PlanRow[],
   targets: TargetRow[],
 ) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = shanghaiDate();
   const instrumentById = new Map(instruments.map((item) => [item.id, item]));
   const accountById = new Map(accounts.map((item) => [item.id, item]));
   const orderedLedger = [...ledger].sort(
@@ -91,35 +104,13 @@ export function calculatePortfolio(
     a.price_date.localeCompare(b.price_date),
   );
   const firstDate = orderedLedger[0]?.trade_date ?? today;
-  const explicitCashAccounts = new Set(
-    orderedLedger
-      .filter(
-        (entry) => entry.kind === "DEPOSIT" || entry.kind === "WITHDRAWAL",
-      )
-      .map((entry) => entry.account_id),
-  );
-
-  const investorCashFlow = (entry: LedgerRow): number => {
-    const gross = entry.gross_amount_units / MONEY_SCALE;
-    const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
-    if (explicitCashAccounts.has(entry.account_id)) {
-      if (entry.kind === "DEPOSIT") return -gross;
-      if (entry.kind === "WITHDRAWAL") return gross;
-      return 0;
-    }
-    if (entry.kind === "BUY") return -(gross + fee);
-    if (entry.kind === "SELL") return gross - fee;
-    if (entry.kind === "DIVIDEND") return gross - fee;
-    if (entry.kind === "FEE") return -gross;
-    return 0;
-  };
-
-  const contributionForAccount = (accountId: number): number =>
-    -orderedLedger
-      .filter((entry) => entry.account_id === accountId)
-      .reduce((sum, entry) => sum + investorCashFlow(entry), 0);
 
   const cashByAccount = new Map<number, number>();
+  // Investor-perspective cash flow: contributions are negative, withdrawals
+  // are positive. Keeping it per ledger row lets TWR, XIRR and the account
+  // summaries share exactly the same cash-flow convention.
+  const investorCashFlowByEntry = new Map<number, number>();
+  const contributionByAccount = new Map<number, number>();
   const positions = new Map<
     string,
     {
@@ -136,6 +127,14 @@ export function calculatePortfolio(
   let realized = 0;
   let income = 0;
   let fees = 0;
+
+  const recordInvestorCashFlow = (entry: LedgerRow, value: number) => {
+    investorCashFlowByEntry.set(entry.id, value);
+    contributionByAccount.set(
+      entry.account_id,
+      (contributionByAccount.get(entry.account_id) ?? 0) - value,
+    );
+  };
 
   const applyEntry = (entry: LedgerRow) => {
     const cash = cashByAccount.get(entry.account_id) ?? 0;
@@ -154,14 +153,20 @@ export function calculatePortfolio(
     if (entry.kind === "DEPOSIT") {
       deposits += gross;
       cashByAccount.set(entry.account_id, cash + gross);
+      recordInvestorCashFlow(entry, -gross);
     } else if (entry.kind === "WITHDRAWAL") {
       withdrawals += gross;
       cashByAccount.set(entry.account_id, cash - gross);
+      recordInvestorCashFlow(entry, gross);
     } else if (entry.kind === "BUY") {
+      const requiredCash = gross + fee;
+      const cashTopUp = Math.max(0, requiredCash - cash);
       position.quantity += quantity;
-      position.cost += gross + fee;
+      position.cost += requiredCash;
       fees += fee;
-      cashByAccount.set(entry.account_id, cash - gross - fee);
+      deposits += cashTopUp;
+      cashByAccount.set(entry.account_id, cash + cashTopUp - requiredCash);
+      recordInvestorCashFlow(entry, -cashTopUp);
       positions.set(key, position);
     } else if (entry.kind === "SELL") {
       const matchedQuantity = Math.min(quantity, position.quantity);
@@ -176,6 +181,7 @@ export function calculatePortfolio(
       realized += profit;
       fees += fee;
       cashByAccount.set(entry.account_id, cash + gross - fee);
+      recordInvestorCashFlow(entry, 0);
       positions.set(key, position);
     } else if (entry.kind === "DIVIDEND") {
       const net = gross - fee;
@@ -183,10 +189,14 @@ export function calculatePortfolio(
       income += net;
       fees += fee;
       cashByAccount.set(entry.account_id, cash + net);
+      recordInvestorCashFlow(entry, 0);
       positions.set(key, position);
     } else if (entry.kind === "FEE") {
+      const cashTopUp = Math.max(0, gross - cash);
       fees += gross;
-      cashByAccount.set(entry.account_id, cash - gross);
+      deposits += cashTopUp;
+      cashByAccount.set(entry.account_id, cash + cashTopUp - gross);
+      recordInvestorCashFlow(entry, -cashTopUp);
     }
   };
   orderedLedger.forEach(applyEntry);
@@ -221,17 +231,15 @@ export function calculatePortfolio(
     (sum, item) => sum + item.marketValue,
     0,
   );
-  // Accounts with explicit deposits/withdrawals retain their cash balance.
-  // For trade-only accounts, buys and sells are treated as external investor
-  // cash flows so a direct BUY entry never creates a fictitious negative cash
-  // balance or a zero contribution amount.
-  const cash = [...cashByAccount.entries()]
-    .filter(([accountId]) => explicitCashAccounts.has(accountId))
-    .reduce((sum, [, value]) => sum + value, 0);
-  const totalAssets = securitiesValue + cash;
-  const contributionByAccount = new Map(
-    accounts.map((account) => [account.id, contributionForAccount(account.id)]),
+  const holdingCost = holdings.reduce((sum, item) => sum + item.cost, 0);
+  // Every account retains its available cash. A direct BUY without a prior
+  // deposit receives only the cash top-up needed for that purchase, while
+  // proceeds and dividends stay in the account until a WITHDRAWAL is recorded.
+  const cash = [...cashByAccount.values()].reduce(
+    (sum, value) => sum + value,
+    0,
   );
+  const totalAssets = securitiesValue + cash;
   const netContributions = [...contributionByAccount.values()].reduce(
     (sum, value) => sum + value,
     0,
@@ -280,46 +288,32 @@ export function calculatePortfolio(
       const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
       const quantity = entry.quantity_units / QUANTITY_SCALE;
       const currentCash = simCash.get(entry.account_id) ?? 0;
-      const usesExplicitCash = explicitCashAccounts.has(entry.account_id);
+      const portfolioExternalFlow = -(
+        investorCashFlowByEntry.get(entry.id) ?? 0
+      );
+      externalFlow += portfolioExternalFlow;
+      cumulativeContributions += portfolioExternalFlow;
       const key = `${entry.account_id}:${entry.instrument_id ?? 0}`;
       if (entry.kind === "DEPOSIT") {
-        externalFlow += gross;
-        cumulativeContributions += gross;
         simCash.set(entry.account_id, currentCash + gross);
       } else if (entry.kind === "WITHDRAWAL") {
-        externalFlow -= gross;
-        cumulativeContributions -= gross;
         simCash.set(entry.account_id, currentCash - gross);
       } else if (entry.kind === "BUY") {
         simQty.set(key, (simQty.get(key) ?? 0) + quantity);
-        if (usesExplicitCash) {
-          simCash.set(entry.account_id, currentCash - gross - fee);
-        } else {
-          externalFlow += gross + fee;
-          cumulativeContributions += gross + fee;
-        }
+        simCash.set(
+          entry.account_id,
+          currentCash + portfolioExternalFlow - gross - fee,
+        );
       } else if (entry.kind === "SELL") {
         simQty.set(key, Math.max(0, (simQty.get(key) ?? 0) - quantity));
-        if (usesExplicitCash) {
-          simCash.set(entry.account_id, currentCash + gross - fee);
-        } else {
-          externalFlow -= gross - fee;
-          cumulativeContributions -= gross - fee;
-        }
+        simCash.set(entry.account_id, currentCash + gross - fee);
       } else if (entry.kind === "DIVIDEND") {
-        if (usesExplicitCash) {
-          simCash.set(entry.account_id, currentCash + gross - fee);
-        } else {
-          externalFlow -= gross - fee;
-          cumulativeContributions -= gross - fee;
-        }
+        simCash.set(entry.account_id, currentCash + gross - fee);
       } else if (entry.kind === "FEE") {
-        if (usesExplicitCash) {
-          simCash.set(entry.account_id, currentCash - gross);
-        } else {
-          externalFlow += gross;
-          cumulativeContributions += gross;
-        }
+        simCash.set(
+          entry.account_id,
+          currentCash + portfolioExternalFlow - gross,
+        );
       }
     }
     const simulatedCash = [...simCash.values()].reduce(
@@ -396,7 +390,7 @@ export function calculatePortfolio(
   const cashFlows = orderedLedger
     .map((entry) => ({
       date: entry.trade_date,
-      value: investorCashFlow(entry),
+      value: investorCashFlowByEntry.get(entry.id) ?? 0,
     }))
     .filter((entry) => entry.value !== 0);
   cashFlows.push({ date: today, value: totalAssets });
@@ -408,22 +402,25 @@ export function calculatePortfolio(
     const accountHoldings = holdings.filter(
       (item) => item.accountId === account.id,
     );
-    const accountAssets =
-      accountHoldings.reduce((sum, item) => sum + item.marketValue, 0) +
-      (explicitCashAccounts.has(account.id)
-        ? (cashByAccount.get(account.id) ?? 0)
-        : 0);
+    const accountSecuritiesValue = accountHoldings.reduce(
+      (sum, item) => sum + item.marketValue,
+      0,
+    );
+    const accountCash = cashByAccount.get(account.id) ?? 0;
+    const accountAssets = accountSecuritiesValue + accountCash;
     const net = contributionByAccount.get(account.id) ?? 0;
     const accountCashFlows = orderedLedger
       .filter((entry) => entry.account_id === account.id)
       .map((entry) => ({
         date: entry.trade_date,
-        value: investorCashFlow(entry),
+        value: investorCashFlowByEntry.get(entry.id) ?? 0,
       }))
       .filter((entry) => entry.value !== 0);
     return {
       ...account,
       assets: accountAssets,
+      securitiesValue: accountSecuritiesValue,
+      cash: accountCash,
       contributions: net,
       profit: accountAssets - net,
       returnRate: calculateXirr(
@@ -474,9 +471,25 @@ export function calculatePortfolio(
     }))
     .sort((a, b) => b.returnRate - a.returnRate);
 
+  // Freshness is based only on instruments that are currently held. The
+  // earliest held-instrument price is the conservative portfolio valuation
+  // date; the latest date and missing count make mixed update states explicit.
+  const holdingPriceDates = holdings
+    .map((item) => item.priceDate)
+    .filter((value): value is string => value !== null)
+    .sort();
+  const missingPriceCount = holdings.filter(
+    (item) => item.priceDate === null,
+  ).length;
+  const valuationDate = holdingPriceDates.at(0) ?? null;
+  const latestValuationDate = holdingPriceDates.at(-1) ?? null;
+
   return {
     metrics: {
       totalAssets,
+      securitiesValue,
+      cash,
+      holdingCost,
       deposits,
       withdrawals,
       netContributions,
@@ -520,11 +533,9 @@ export function calculatePortfolio(
     monthly,
     allocation,
     rankings,
-    valuationDate:
-      [...latestPrice.values()]
-        .map((item) => item.price_date)
-        .sort()
-        .at(-1) ?? null,
+    valuationDate,
+    latestValuationDate,
+    missingPriceCount,
     methodology:
       "日初现金流约定的日频 TWR；存在日内现金流但缺少流前估值时为估算值",
   };

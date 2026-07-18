@@ -1,0 +1,12 @@
+[Unit]
+Description=Synchronize Yingji fund NAV data every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/5:00
+AccuracySec=5s
+RandomizedDelaySec=20s
+Persistent=true
+Unit=yingji-nav-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Synchronize Yingji fund NAV data
+Documentation=https://yingji.kivelo0017.xyz
+After=network-online.target yingji.service
+Wants=network-online.target
+Requires=yingji.service
+
+[Service]
+Type=oneshot
+User=yingji
+Group=yingji
+ExecStart=/usr/bin/curl --fail --silent --show-error --output /dev/null --max-time 90 --retry 2 --retry-delay 2 --header 'Content-Type: application/json' --data-raw '{"action":"syncAllFunds","force":true}' http://127.0.0.1:8787/api/portfolio
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true

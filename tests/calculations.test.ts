@@ -304,10 +304,268 @@ test("a trade-only account derives invested capital without negative cash", () =
 
   assert.equal(result.metrics.netContributions, 10_010);
   assert.equal(result.metrics.totalAssets, 9_800);
+  assert.equal(result.metrics.securitiesValue, 9_800);
+  assert.equal(result.metrics.cash, 0);
+  assert.equal(result.metrics.holdingCost, 10_010);
   assert.equal(result.metrics.totalProfit, -210);
   assert.equal(result.accounts[0].contributions, 10_010);
   assert.equal(result.accounts[0].assets, 9_800);
+  assert.equal(result.accounts[0].securitiesValue, 9_800);
+  assert.equal(result.accounts[0].cash, 0);
   assert.equal(result.accounts[0].profit, -210);
+  assert.equal(
+    result.metrics.totalAssets,
+    result.metrics.netContributions + result.metrics.totalProfit,
+  );
   assert.equal(result.allocation[0].actual, 1);
   assert.ok(result.allocation.every((item) => item.actual >= 0));
+});
+
+const accountingAccount: AccountRow = {
+  id: 1,
+  name: "Retained cash account",
+  currency: "CNY",
+  color: "#5B7CFA",
+  cost_method: "MOVING_AVERAGE",
+};
+
+function accountingInstrument(id = 1): InstrumentRow {
+  return {
+    id,
+    name: `Fund ${id}`,
+    code: String(id).padStart(6, "0"),
+    market: "CN",
+    asset_class: "EQUITY",
+    currency: "CNY",
+    product_type: "FUND",
+    buy_fee_bps: 0,
+    buy_discount_bps: 10_000,
+    sell_fee_bps: 0,
+    min_fee_units: 0,
+    eastmoney_fee_bps: 0,
+    min_purchase_units: 0,
+    redemption_fee_json: "[]",
+    data_source: "TEST",
+    source_updated_at: "",
+  };
+}
+
+function accountingEntry(
+  id: number,
+  kind: LedgerRow["kind"],
+  options: {
+    date?: string;
+    instrumentId?: number | null;
+    quantity?: number;
+    price?: number;
+    gross?: number;
+    fee?: number;
+  } = {},
+): LedgerRow {
+  const quantity = options.quantity ?? 0;
+  const price = options.price ?? 0;
+  const gross = options.gross ?? quantity * price;
+  return {
+    id,
+    account_id: 1,
+    instrument_id:
+      options.instrumentId === undefined ? 1 : options.instrumentId,
+    kind,
+    trade_date: options.date ?? "2026-07-15",
+    confirmation_date: options.date ?? "2026-07-15",
+    quantity_units: quantity * QUANTITY_SCALE,
+    price_units: price * PRICE_SCALE,
+    gross_amount_units: gross * MONEY_SCALE,
+    fee_units: (options.fee ?? 0) * MONEY_SCALE,
+    tax_units: 0,
+    notes: "",
+    external_ref: "",
+    purchase_channel: "THIRD_PARTY",
+    fee_source: "TEST",
+  };
+}
+
+function accountingPrice(
+  id: number,
+  price: number,
+  date = "2026-07-18",
+  instrumentId = 1,
+): PriceRow {
+  return {
+    id,
+    instrument_id: instrumentId,
+    price_date: date,
+    price_units: price * PRICE_SCALE,
+    source: "TEST",
+  };
+}
+
+test("an open profitable holding is included in total assets", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [accountingEntry(1, "BUY", { quantity: 100, price: 10 })],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.netContributions, 1_000);
+  assert.equal(result.metrics.securitiesValue, 1_200);
+  assert.equal(result.metrics.cash, 0);
+  assert.equal(result.metrics.totalAssets, 1_200);
+  assert.equal(result.metrics.unrealized, 200);
+  assert.equal(result.metrics.totalProfit, 200);
+  assert.equal(
+    result.metrics.totalAssets,
+    result.metrics.netContributions + result.metrics.totalProfit,
+  );
+});
+
+test("a partial sale stays as cash and realized profit remains in total assets", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10 }),
+      accountingEntry(2, "SELL", {
+        date: "2026-07-16",
+        quantity: 40,
+        price: 15,
+      }),
+    ],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.netContributions, 1_000);
+  assert.equal(result.metrics.securitiesValue, 720);
+  assert.equal(result.metrics.cash, 600);
+  assert.equal(result.metrics.totalAssets, 1_320);
+  assert.equal(result.metrics.realized, 200);
+  assert.equal(result.metrics.unrealized, 120);
+  assert.equal(result.metrics.totalProfit, 320);
+  assert.equal(result.accounts[0].cash, 600);
+  assert.equal(result.accounts[0].securitiesValue, 720);
+});
+
+test("reusing retained sale proceeds does not increase invested capital", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10 }),
+      accountingEntry(2, "SELL", {
+        date: "2026-07-16",
+        quantity: 40,
+        price: 15,
+      }),
+      accountingEntry(3, "BUY", {
+        date: "2026-07-17",
+        quantity: 30,
+        price: 10,
+      }),
+    ],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.deposits, 1_000);
+  assert.equal(result.metrics.netContributions, 1_000);
+  assert.equal(result.metrics.cash, 300);
+  assert.equal(result.metrics.securitiesValue, 1_080);
+  assert.equal(result.metrics.totalAssets, 1_380);
+  assert.equal(result.metrics.totalProfit, 380);
+});
+
+test("withdrawing retained cash reduces net investment but not earned profit", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10 }),
+      accountingEntry(2, "SELL", {
+        date: "2026-07-16",
+        quantity: 40,
+        price: 15,
+      }),
+      accountingEntry(3, "WITHDRAWAL", {
+        date: "2026-07-17",
+        instrumentId: null,
+        gross: 500,
+      }),
+    ],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.withdrawals, 500);
+  assert.equal(result.metrics.netContributions, 500);
+  assert.equal(result.metrics.cash, 100);
+  assert.equal(result.metrics.totalAssets, 820);
+  assert.equal(result.metrics.totalProfit, 320);
+  assert.equal(
+    result.metrics.totalAssets,
+    result.metrics.netContributions + result.metrics.totalProfit,
+  );
+});
+
+test("dividends remain as available cash until explicitly withdrawn", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10 }),
+      accountingEntry(2, "DIVIDEND", {
+        date: "2026-07-17",
+        quantity: 0,
+        price: 0,
+        gross: 50,
+      }),
+    ],
+    [accountingPrice(1, 10)],
+    [],
+    [],
+  );
+
+  assert.equal(result.metrics.netContributions, 1_000);
+  assert.equal(result.metrics.income, 50);
+  assert.equal(result.metrics.cash, 50);
+  assert.equal(result.metrics.totalAssets, 1_050);
+  assert.equal(result.metrics.totalProfit, 50);
+});
+
+test("valuation freshness is derived conservatively from held instruments", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument(1), accountingInstrument(2), accountingInstrument(3)],
+    [
+      accountingEntry(1, "BUY", { instrumentId: 1, quantity: 10, price: 10 }),
+      accountingEntry(2, "BUY", {
+        date: "2026-07-16",
+        instrumentId: 2,
+        quantity: 10,
+        price: 10,
+      }),
+      accountingEntry(3, "BUY", {
+        date: "2026-07-17",
+        instrumentId: 3,
+        quantity: 10,
+        price: 10,
+      }),
+    ],
+    [
+      accountingPrice(1, 11, "2026-07-16", 1),
+      accountingPrice(2, 12, "2026-07-17", 2),
+    ],
+    [],
+    [],
+  );
+
+  assert.equal(result.valuationDate, "2026-07-16");
+  assert.equal(result.latestValuationDate, "2026-07-17");
+  assert.equal(result.missingPriceCount, 1);
 });

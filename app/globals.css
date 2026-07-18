@@ -2438,6 +2438,101 @@ td small {
   }
 }
 
+/* Alipay-style total-asset composition and visible NAV freshness. */
+.hero-balance {
+  min-height: 350px;
+}
+.asset-inclusion {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0 0 !important;
+  color: #dfe6fb !important;
+  font-size: 14px !important;
+  line-height: 1.45;
+}
+.asset-inclusion svg {
+  flex: 0 0 auto;
+  color: #71dfba;
+}
+.asset-sync-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+  color: #aebbd9;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.asset-sync-line > span {
+  min-width: 0;
+}
+.asset-sync-line button {
+  min-height: 31px;
+  padding: 4px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: white;
+  font: inherit;
+  font-weight: 650;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.asset-sync-line button:disabled {
+  opacity: 0.7;
+}
+.hero-chart {
+  inset: 244px -15px 0;
+}
+.account-current-assets small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.spinning {
+  animation: nav-spin 0.9s linear infinite;
+}
+@keyframes nav-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 680px) {
+  .hero-balance {
+    min-height: 545px;
+  }
+  .asset-inclusion {
+    align-items: flex-start;
+    font-size: 13px !important;
+  }
+  .hero-cashflow {
+    gap: 6px;
+  }
+  .hero-cashflow span {
+    font-size: 12px;
+  }
+  .asset-sync-line {
+    align-items: flex-start;
+    font-size: 12px;
+  }
+  .asset-sync-line button {
+    min-height: 34px;
+    font-size: 12px;
+  }
+  .hero-stats {
+    margin-top: 17px;
+  }
+  .hero-chart {
+    inset: 468px -15px 0;
+  }
+  .account-current-assets small {
+    font-size: 11px;
+  }
+}
+
 /* Readability and interaction baseline for financial data. */
 body {
   font-size: 15.5px;

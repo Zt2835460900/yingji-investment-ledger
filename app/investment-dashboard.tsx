@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -76,6 +76,9 @@ interface PortfolioData {
     twr: number;
     xirr: number | null;
     todayProfit: number;
+    securitiesValue: number;
+    cash: number;
+    holdingCost: number;
   };
   risk: {
     volatility: number;
@@ -94,6 +97,8 @@ interface PortfolioData {
     contributions: number;
     profit: number;
     returnRate: number | null;
+    securitiesValue: number;
+    cash: number;
   }>;
   instruments: Array<{
     id: number;
@@ -181,6 +186,16 @@ interface PortfolioData {
   }>;
   rankings: Array<{ name: string; profit: number; returnRate: number }>;
   valuationDate: string | null;
+  latestValuationDate?: string | null;
+  missingPriceCount?: number;
+  navSync?: {
+    lastAttemptAt?: string | null;
+    lastSuccessAt?: string | null;
+    synced?: number;
+    total?: number;
+    official?: number;
+    status?: "idle" | "running" | "success" | "partial" | "error";
+  };
   methodology: string;
 }
 
@@ -252,6 +267,19 @@ const percent = (value: number | null, digits = 2) =>
     : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`;
 const dateText = (value: string | null) =>
   value ? value.replaceAll("-", ".") : "暂无估值";
+const syncTimeText = (value: string | null | undefined) => {
+  if (!value) return "等待首次同步";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "已同步";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  }).format(date);
+};
 
 const addBusinessDays = (dateTextValue: string, businessDays: number) => {
   const date = new Date(`${dateTextValue}T12:00:00`);
@@ -406,15 +434,50 @@ export function InvestmentDashboard() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
+  const [navSyncing, setNavSyncing] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const catalogSyncStarted = useRef(false);
+  const navSyncInFlight = useRef(false);
   const navigateView = (next: View) => {
     setView(next);
     window.history.replaceState(null, "", `#${next}`);
     setMobileMenu(false);
   };
 
-  const load = async () => {
+  const syncFunds = useCallback(async (force = false, announce = false) => {
+    if (navSyncInFlight.current) return;
+    navSyncInFlight.current = true;
+    setNavSyncing(true);
+    try {
+      const response = await fetch("/api/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "syncAllFunds", force }),
+      });
+      const result = (await response.json()) as PortfolioData & {
+        error?: string;
+      };
+      if (!response.ok) throw new Error(result.error || "净值同步失败");
+      setData(result);
+      if (announce) {
+        const synced = result.navSync?.synced ?? 0;
+        const total = result.navSync?.total ?? 0;
+        setToast(
+          total > 0 ? `净值已更新 ${synced}/${total}` : "暂无需要同步的基金",
+        );
+        window.setTimeout(() => setToast(""), 2600);
+      }
+    } catch (caught) {
+      if (announce) {
+        setToast(caught instanceof Error ? caught.message : "净值同步失败");
+        window.setTimeout(() => setToast(""), 3200);
+      }
+    } finally {
+      navSyncInFlight.current = false;
+      setNavSyncing(false);
+    }
+  }, []);
+
+  const load = useCallback(async () => {
     try {
       const response = await fetch("/api/portfolio", { cache: "no-store" });
       const result = (await response.json()) as PortfolioData & {
@@ -422,35 +485,31 @@ export function InvestmentDashboard() {
       };
       if (!response.ok) throw new Error(result.error || "读取失败");
       setData(result);
-      if (!catalogSyncStarted.current) {
-        catalogSyncStarted.current = true;
-        void fetch("/api/portfolio", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "syncAllFunds" }),
-        })
-          .then(async (syncResponse) => {
-            const synced = (await syncResponse.json()) as PortfolioData & {
-              error?: string;
-            };
-            if (syncResponse.ok) setData(synced);
-          })
-          .catch(() => {
-            // Keep locally stored names and types when the public source is down.
-          });
-      }
+      void syncFunds(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "读取失败");
     }
-  };
+  }, [syncFunds]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void load();
       const requested = window.location.hash.slice(1) as View;
       if (navItems.some((item) => item.id === requested)) setView(requested);
     }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
+    const interval = window.setInterval(
+      () => void syncFunds(false),
+      3 * 60_000,
+    );
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") void syncFunds(false);
+    };
+    document.addEventListener("visibilitychange", syncWhenVisible);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", syncWhenVisible);
+    };
+  }, [load, syncFunds]);
 
   const submit = async (
     payload: Record<string, unknown>,
@@ -496,7 +555,12 @@ export function InvestmentDashboard() {
 
   const content =
     view === "overview" ? (
-      <Overview data={data} onEntry={() => setModal("entry")} />
+      <Overview
+        data={data}
+        onEntry={() => setModal("entry")}
+        onSync={() => void syncFunds(true, true)}
+        syncing={navSyncing}
+      />
     ) : view === "accounts" ? (
       <Accounts
         data={data}
@@ -607,7 +671,7 @@ export function InvestmentDashboard() {
           <div className="top-actions">
             <span className="valuation-pill">
               <i />
-              估值截至 {dateText(data.valuationDate)}
+              净值截至 {dateText(data.valuationDate)}
             </span>
             <button
               className="primary-button"
@@ -679,11 +743,37 @@ export function InvestmentDashboard() {
 function Overview({
   data,
   onEntry,
+  onSync,
+  syncing,
 }: {
   data: PortfolioData;
   onEntry: () => void;
+  onSync: () => void;
+  syncing: boolean;
 }) {
   const m = data.metrics;
+  const valuationRange =
+    data.latestValuationDate && data.latestValuationDate !== data.valuationDate
+      ? `${dateText(data.valuationDate)}—${dateText(data.latestValuationDate)}`
+      : dateText(data.valuationDate);
+  const officialCount = data.navSync?.official ?? 0;
+  const syncedCount = data.navSync?.synced ?? 0;
+  const sourceLabel =
+    syncedCount === 0
+      ? "等待净值"
+      : officialCount >= syncedCount
+        ? "官方来源"
+        : officialCount > 0
+          ? "官方＋备用来源"
+          : "备用来源";
+  const syncStatus =
+    data.navSync?.status === "running"
+      ? "后台同步中"
+      : data.navSync?.status === "partial"
+        ? "部分产品待更新"
+        : data.navSync?.status === "error"
+          ? "本次同步未完成"
+          : sourceLabel;
   const recentSeries = data.series.slice(-120);
   const monthlyTotal = data.monthly.reduce((sum, item) => sum + item.profit, 0);
   const currentMonthProfit = data.monthly.at(-1)?.profit ?? 0;
@@ -704,12 +794,29 @@ function Overview({
       <section className="hero-balance">
         <div className="hero-head">
           <div>
-            <span className="eyebrow">总资产</span>
+            <span className="eyebrow">总资产（元）</span>
             <strong>¥ {money(m.totalAssets)}</strong>
+            <p className="asset-inclusion">
+              <Check size={15} />{" "}
+              已包含持仓的全部浮动盈亏；卖出款和分红留在可用现金
+            </p>
             <div className="hero-cashflow" aria-label="资金概览">
-              <span>累计入金 ¥{money(m.deposits)}</span>
-              <span>累计出金 ¥{money(m.withdrawals)}</span>
-              <span>直接买入会自动计入投入本金</span>
+              <span>持仓市值 ¥{money(m.securitiesValue ?? m.totalAssets)}</span>
+              <span>可用现金 ¥{money(m.cash ?? 0)}</span>
+              <span>净投入＋累计收益＝总资产</span>
+            </div>
+            <div className="asset-sync-line" aria-live="polite">
+              <span>
+                净值日期 {valuationRange} · {syncStatus} · 同步于{" "}
+                {syncTimeText(data.navSync?.lastSuccessAt)}
+                {(data.missingPriceCount ?? 0) > 0
+                  ? ` · ${data.missingPriceCount} 项待估值`
+                  : ""}
+              </span>
+              <button type="button" onClick={onSync} disabled={syncing}>
+                <RefreshCcw size={14} className={syncing ? "spinning" : ""} />
+                {syncing ? "同步中" : "更新净值"}
+              </button>
             </div>
           </div>
           <button className="ghost-button" onClick={onEntry}>
@@ -739,7 +846,7 @@ function Overview({
             <strong>{percent(m.xirr)}</strong>
           </div>
           <div>
-            <span>今日盈亏</span>
+            <span>最新日盈亏</span>
             <strong className={m.todayProfit >= 0 ? "up" : "down"}>
               {m.todayProfit >= 0 ? "+" : ""}¥{money(m.todayProfit)}
             </strong>
@@ -907,10 +1014,12 @@ function Overview({
                 <strong>{account.name}</strong>
                 <span>累计净投入 ¥{money(account.contributions, 0)}</span>
               </div>
-              <div>
+              <div className="account-current-assets">
+                <small>当前资产（含盈亏）</small>
                 <strong>¥{money(account.assets)}</strong>
                 <span className={account.profit >= 0 ? "up" : "down"}>
-                  {account.profit >= 0 ? "+" : ""}¥{money(account.profit)} ·{" "}
+                  累计收益 {account.profit >= 0 ? "+" : ""}¥
+                  {money(account.profit)} · 年化 XIRR{" "}
                   {percent(account.returnRate)}
                 </span>
               </div>

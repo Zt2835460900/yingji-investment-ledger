@@ -33,6 +33,15 @@ export interface FundNavPoint {
   nav: number;
 }
 
+export type FundNavSource = "OFFICIAL_EFUNDS" | "EASTMONEY";
+
+export interface FundNavQuote extends FundNavPoint {
+  code: string;
+  source: FundNavSource;
+  isOfficial: boolean;
+  fetchedAt: string;
+}
+
 export function selectFundNav(
   points: FundNavPoint[],
   requestedDate = "",
@@ -47,6 +56,120 @@ export function selectFundNav(
     .sort((a, b) => a.date.localeCompare(b.date));
   if (!requestedDate) return ordered.at(-1) ?? null;
   return ordered.findLast((point) => point.date <= requestedDate) ?? null;
+}
+
+const normalizeNavDate = (value: string) => {
+  const match = value.trim().match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (!match) return "";
+  const month = match[2].padStart(2, "0");
+  const day = match[3].padStart(2, "0");
+  return `${match[1]}-${month}-${day}`;
+};
+
+/**
+ * Parse the official E Fund product page. The public page exposes the current
+ * published NAV and its valuation date in stable, semantic elements.
+ */
+export function parseEfundsOfficialNav(html: string): FundNavPoint | null {
+  const navText = html.match(
+    /<[^>]*\bid=["']net-today["'][^>]*>\s*([0-9]+(?:\.[0-9]+)?)\s*</i,
+  )?.[1];
+  const dateText = html.match(
+    /<[^>]*\bclass=["'][^"']*\bnav-update\b[^"']*["'][^>]*>\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\s*</i,
+  )?.[1];
+  const nav = Number(navText);
+  const date = normalizeNavDate(dateText ?? "");
+  if (!date || !Number.isFinite(nav) || nav <= 0) return null;
+  return { date, nav };
+}
+
+function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
+  const navStart = script.indexOf("var Data_netWorthTrend");
+  const navEnd = navStart >= 0 ? script.indexOf("];", navStart) : -1;
+  const navBlock =
+    navStart >= 0 && navEnd > navStart
+      ? script.slice(navStart, navEnd + 1)
+      : "";
+  const points: FundNavPoint[] = [];
+  for (const match of navBlock.matchAll(/\{"x":(\d+),"y":([\d.]+)/g)) {
+    const timestamp = Number(match[1]);
+    const nav = Number(match[2]);
+    const date = timestamp
+      ? new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      : "";
+    if (date && Number.isFinite(nav) && nav > 0) points.push({ date, nav });
+  }
+  return points;
+}
+
+export function parseEastmoneyLatestNav(script: string): FundNavPoint | null {
+  return selectFundNav(parseEastmoneyNavPoints(script));
+}
+
+const fundRequestHeaders = {
+  "User-Agent": "Yingji/1.0 personal-ledger",
+};
+
+async function fetchText(url: string, timeoutMs: number) {
+  const response = await fetch(url, {
+    headers: fundRequestHeaders,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.text();
+}
+
+/**
+ * Fast path used by background valuation refreshes. It deliberately avoids
+ * downloading the fee and product-profile pages. E Fund products prefer the
+ * fund manager's official page; all failures fall back to Eastmoney so one
+ * provider outage does not stop portfolio valuation.
+ */
+export async function fetchLatestFundNav(
+  codeInput: string,
+  fundName = "",
+): Promise<FundNavQuote> {
+  const code = codeInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("基金或 ETF 代码应为 6 位数字");
+
+  if (/易方达/.test(fundName)) {
+    try {
+      const html = await fetchText(
+        `https://www.efunds.com.cn/fund/${code}.shtml`,
+        5_500,
+      );
+      const point = parseEfundsOfficialNav(html);
+      if (point)
+        return {
+          code,
+          ...point,
+          source: "OFFICIAL_EFUNDS",
+          isOfficial: true,
+          fetchedAt: new Date().toISOString(),
+        };
+    } catch {
+      // Fall through to the fast backup source.
+    }
+  }
+
+  let script = "";
+  try {
+    script = await fetchText(
+      `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
+      5_500,
+    );
+  } catch {
+    throw new Error("基金净值数据源暂时不可用");
+  }
+  const point = parseEastmoneyLatestNav(script);
+  if (!point) throw new Error("未查询到可用的基金净值");
+  return {
+    code,
+    ...point,
+    source: "EASTMONEY",
+    isOfficial: false,
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 const plainText = (value: string) =>
@@ -167,16 +290,16 @@ export async function fetchLiveFundData(
     fetch(
       `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
       {
-        headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+        headers: fundRequestHeaders,
         signal,
       },
     ),
     fetch(`https://fundf10.eastmoney.com/jjfl_${code}.html`, {
-      headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+      headers: fundRequestHeaders,
       signal,
     }),
     fetch(`https://fundf10.eastmoney.com/jbgk_${code}.html`, {
-      headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+      headers: fundRequestHeaders,
       signal,
     }),
   ]);
@@ -192,21 +315,7 @@ export async function fetchLiveFundData(
   if (!name) throw new Error("该代码暂无可用基金资料");
   let latestNav = 0;
   let latestNavDate = "";
-  const navPoints: FundNavPoint[] = [];
-  const navStart = script.indexOf("var Data_netWorthTrend");
-  const navEnd = navStart >= 0 ? script.indexOf("];", navStart) : -1;
-  const navBlock =
-    navStart >= 0 && navEnd > navStart
-      ? script.slice(navStart, navEnd + 1)
-      : "";
-  for (const match of navBlock.matchAll(/\{"x":(\d+),"y":([\d.]+)/g)) {
-    const timestamp = Number(match[1]);
-    const nav = Number(match[2]);
-    const date = timestamp
-      ? new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
-      : "";
-    if (date && Number.isFinite(nav) && nav > 0) navPoints.push({ date, nav });
-  }
+  const navPoints = parseEastmoneyNavPoints(script);
   const latestPoint = selectFundNav(navPoints);
   const quotePoint = selectFundNav(navPoints, quoteDate);
   latestNav = latestPoint?.nav ?? 0;

@@ -4,7 +4,7 @@ import {
   calculateTradingFeeUnits,
   feeRuleFromInput,
 } from "@/lib/fees";
-import { fetchLiveFundData } from "@/lib/fund-data";
+import { fetchLatestFundNav, fetchLiveFundData } from "@/lib/fund-data";
 import {
   decimalToUnits,
   isoDate,
@@ -28,6 +28,49 @@ export const dynamic = "force-dynamic";
 
 const instrumentColumns =
   "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
+
+const NAV_SYNC_COOLDOWN_MS = 2 * 60 * 1000;
+
+async function upsertSyncedPrice(
+  d1: D1Database,
+  instrumentId: number,
+  priceDate: string,
+  nav: number,
+  source: string,
+) {
+  if (!priceDate || !Number.isFinite(nav) || nav <= 0) return;
+  await d1
+    .prepare(
+      `INSERT INTO prices (instrument_id, price_date, price_units, source)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(instrument_id, price_date) DO UPDATE SET
+         price_units = excluded.price_units,
+         source = excluded.source
+       WHERE prices.source <> 'MANUAL'
+         AND NOT (prices.source = 'OFFICIAL_EFUNDS' AND excluded.source = 'EASTMONEY')`,
+    )
+    .bind(instrumentId, priceDate, decimalToUnits(nav, PRICE_SCALE), source)
+    .run();
+}
+
+async function syncLatestFundNav(
+  d1: D1Database,
+  instrument: Pick<InstrumentRow, "id" | "code" | "name">,
+) {
+  const quote = await fetchLatestFundNav(instrument.code, instrument.name);
+  await upsertSyncedPrice(
+    d1,
+    instrument.id,
+    quote.date,
+    quote.nav,
+    quote.source,
+  );
+  await d1
+    .prepare("UPDATE instruments SET source_updated_at = ? WHERE id = ?")
+    .bind(quote.fetchedAt, instrument.id)
+    .run();
+  return quote;
+}
 
 async function syncFundInstrument(
   d1: D1Database,
@@ -55,31 +98,25 @@ async function syncFundInstrument(
     )
     .run();
   if (live.latestNav && live.latestNavDate)
-    await d1
-      .prepare(
-        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
-      )
-      .bind(
-        instrumentId,
-        live.latestNavDate,
-        decimalToUnits(live.latestNav, PRICE_SCALE),
-      )
-      .run();
+    await upsertSyncedPrice(
+      d1,
+      instrumentId,
+      live.latestNavDate,
+      live.latestNav,
+      live.source,
+    );
   if (
     live.quoteNav &&
     live.quoteNavDate &&
     live.quoteNavDate !== live.latestNavDate
   )
-    await d1
-      .prepare(
-        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
-      )
-      .bind(
-        instrumentId,
-        live.quoteNavDate,
-        decimalToUnits(live.quoteNav, PRICE_SCALE),
-      )
-      .run();
+    await upsertSyncedPrice(
+      d1,
+      instrumentId,
+      live.quoteNavDate,
+      live.quoteNav,
+      live.source,
+    );
   return live;
 }
 
@@ -169,31 +206,25 @@ async function resolveFundInstrument(
     .first<InstrumentRow>();
   if (!instrument) throw new Error("基金资料保存失败");
   if (live.latestNav && live.latestNavDate)
-    await d1
-      .prepare(
-        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
-      )
-      .bind(
-        instrument.id,
-        live.latestNavDate,
-        decimalToUnits(live.latestNav, PRICE_SCALE),
-      )
-      .run();
+    await upsertSyncedPrice(
+      d1,
+      instrument.id,
+      live.latestNavDate,
+      live.latestNav,
+      live.source,
+    );
   if (
     live.quoteNav &&
     live.quoteNavDate &&
     live.quoteNavDate !== live.latestNavDate
   )
-    await d1
-      .prepare(
-        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
-      )
-      .bind(
-        instrument.id,
-        live.quoteNavDate,
-        decimalToUnits(live.quoteNav, PRICE_SCALE),
-      )
-      .run();
+    await upsertSyncedPrice(
+      d1,
+      instrument.id,
+      live.quoteNavDate,
+      live.quoteNav,
+      live.source,
+    );
   return {
     instrument,
     quoteNav: live.quoteNav,
@@ -209,10 +240,62 @@ async function resolveFundInstrument(
   };
 }
 
+type NavSyncStatus = "idle" | "running" | "success" | "partial" | "error";
+
+function navSyncFromRows(rows: Array<{ key: string; value: string }>) {
+  const values = new Map(rows.map((row) => [row.key, row.value]));
+  const numeric = (key: string) => {
+    const value = Number(values.get(key) ?? 0);
+    return Number.isFinite(value) ? value : 0;
+  };
+  const storedStatus = values.get("nav_sync_status");
+  const status: NavSyncStatus = [
+    "idle",
+    "running",
+    "success",
+    "partial",
+    "error",
+  ].includes(storedStatus ?? "")
+    ? (storedStatus as NavSyncStatus)
+    : "idle";
+  return {
+    lastAttemptAt: values.get("nav_sync_last_attempt_at") ?? "",
+    lastSuccessAt: values.get("nav_sync_last_success_at") ?? "",
+    synced: numeric("nav_sync_last_synced"),
+    total: numeric("nav_sync_last_total"),
+    official: numeric("nav_sync_last_official"),
+    status,
+  };
+}
+
+async function readNavSync(d1: D1Database) {
+  const rows = await d1
+    .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
+    .all<{ key: string; value: string }>();
+  return navSyncFromRows(rows.results);
+}
+
+async function writeAppMeta(
+  d1: D1Database,
+  values: Record<string, string | number>,
+) {
+  const entries = Object.entries(values);
+  if (!entries.length) return;
+  await d1.batch(
+    entries.map(([key, value]) =>
+      d1
+        .prepare(
+          "INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key, String(value)),
+    ),
+  );
+}
+
 async function loadPortfolio() {
   await ensureDatabase();
   const d1 = getD1();
-  const [accounts, instruments, ledger, prices, plans, targets] =
+  const [accounts, instruments, ledger, prices, plans, targets, navSyncRows] =
     await Promise.all([
       d1
         .prepare(
@@ -244,15 +327,21 @@ async function loadPortfolio() {
           "SELECT id, instrument_id, target_bps, alert_bps FROM allocation_targets ORDER BY id",
         )
         .all<TargetRow>(),
+      d1
+        .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
+        .all<{ key: string; value: string }>(),
     ]);
-  return calculatePortfolio(
-    accounts.results,
-    instruments.results,
-    ledger.results,
-    prices.results,
-    plans.results,
-    targets.results,
-  );
+  return {
+    ...calculatePortfolio(
+      accounts.results,
+      instruments.results,
+      ledger.results,
+      prices.results,
+      plans.results,
+      targets.results,
+    ),
+    navSync: navSyncFromRows(navSyncRows.results),
+  };
 }
 
 export async function GET() {
@@ -309,28 +398,78 @@ export async function POST(request: Request) {
     const action = String(body.action ?? "");
 
     if (action === "syncAllFunds") {
+      const previousSync = await readNavSync(d1);
+      const lastAttemptTime = Date.parse(previousSync.lastAttemptAt);
+      const force = body.force === true;
+      if (
+        !force &&
+        Number.isFinite(lastAttemptTime) &&
+        Date.now() - lastAttemptTime < NAV_SYNC_COOLDOWN_MS
+      ) {
+        return Response.json({
+          ...(await loadPortfolio()),
+          catalogSync: {
+            synced: previousSync.synced,
+            total: previousSync.total,
+            official: previousSync.official,
+            skipped: true,
+            cooldownSeconds: Math.ceil(NAV_SYNC_COOLDOWN_MS / 1000),
+          },
+        });
+      }
       const instruments = await d1
         .prepare(`SELECT ${instrumentColumns} FROM instruments ORDER BY id`)
         .all<InstrumentRow>();
       let synced = 0;
-      const syncable = instruments.results.filter((instrument) =>
-        /^\d{6}$/.test(instrument.code),
+      let official = 0;
+      const syncable = instruments.results.filter(
+        (instrument) =>
+          ["FUND", "ETF"].includes(instrument.product_type) &&
+          /^\d{6}$/.test(instrument.code),
       );
-      for (let index = 0; index < syncable.length; index += 2) {
+      const attemptAt = new Date().toISOString();
+      await writeAppMeta(d1, {
+        nav_sync_last_attempt_at: attemptAt,
+        nav_sync_last_total: syncable.length,
+        nav_sync_status: "running",
+      });
+      for (let index = 0; index < syncable.length; index += 3) {
         const batch = await Promise.allSettled(
           syncable
-            .slice(index, index + 2)
-            .map((instrument) =>
-              syncFundInstrument(d1, instrument.id, instrument.code),
-            ),
+            .slice(index, index + 3)
+            .map((instrument) => syncLatestFundNav(d1, instrument)),
         );
         for (const result of batch) {
-          if (result.status === "fulfilled") synced += 1;
+          if (result.status === "fulfilled") {
+            synced += 1;
+            if (result.value.isOfficial) official += 1;
+          }
         }
       }
+      const completedAt = new Date().toISOString();
+      const status: NavSyncStatus =
+        syncable.length === 0
+          ? "idle"
+          : synced === syncable.length
+            ? "success"
+            : synced > 0
+              ? "partial"
+              : "error";
+      await writeAppMeta(d1, {
+        nav_sync_last_synced: synced,
+        nav_sync_last_total: syncable.length,
+        nav_sync_last_official: official,
+        nav_sync_status: status,
+        ...(synced > 0 ? { nav_sync_last_success_at: completedAt } : {}),
+      });
       return Response.json({
         ...(await loadPortfolio()),
-        catalogSync: { synced, total: instruments.results.length },
+        catalogSync: {
+          synced,
+          total: syncable.length,
+          official,
+          skipped: false,
+        },
       });
     }
 
@@ -431,16 +570,13 @@ export async function POST(request: Request) {
               )
               .run();
             if (live.latestNav && live.latestNavDate)
-              await d1
-                .prepare(
-                  "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
-                )
-                .bind(
-                  instrumentId,
-                  live.latestNavDate,
-                  decimalToUnits(live.latestNav, PRICE_SCALE),
-                )
-                .run();
+              await upsertSyncedPrice(
+                d1,
+                instrumentId,
+                live.latestNavDate,
+                live.latestNav,
+                live.source,
+              );
             instrument = {
               ...instrument,
               buy_fee_bps: live.standardBuyFeeBps,
@@ -544,7 +680,12 @@ export async function POST(request: Request) {
       if (instrumentId && priceUnits) {
         await d1
           .prepare(
-            "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'TRADE') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+            `INSERT INTO prices (instrument_id, price_date, price_units, source)
+             VALUES (?, ?, ?, 'TRADE')
+             ON CONFLICT(instrument_id, price_date) DO UPDATE SET
+               price_units = excluded.price_units,
+               source = excluded.source
+             WHERE prices.source = 'TRADE'`,
           )
           .bind(instrumentId, isoDate(body.tradeDate), priceUnits)
           .run();

@@ -44,6 +44,8 @@ install -m 0644 /opt/yingji/current/deploy/nginx-yingji.conf /etc/nginx/sites-av
 chmod 0755 /opt/yingji/current/deploy/backup-yingji.sh
 install -m 0644 /opt/yingji/current/deploy/yingji-backup.service /etc/systemd/system/yingji-backup.service
 install -m 0644 /opt/yingji/current/deploy/yingji-backup.timer /etc/systemd/system/yingji-backup.timer
+install -m 0644 /opt/yingji/current/deploy/yingji-nav-sync.service /etc/systemd/system/yingji-nav-sync.service
+install -m 0644 /opt/yingji/current/deploy/yingji-nav-sync.timer /etc/systemd/system/yingji-nav-sync.timer
 install -m 0644 /opt/yingji/current/deploy/yingji-auth.service /etc/systemd/system/yingji-auth.service
 
 systemctl daemon-reload
@@ -59,4 +61,5 @@ curl --fail --silent --show-error --unix-socket /run/yingji-auth/auth.sock \
 nginx -t
 systemctl reload nginx
 systemctl enable --now yingji-backup.timer
+systemctl enable --now yingji-nav-sync.timer
 systemctl start yingji-backup.service
