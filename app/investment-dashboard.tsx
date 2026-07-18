@@ -1,11 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  ArrowDownRight,
-  ArrowUpRight,
   BarChart3,
   CalendarDays,
   Check,
@@ -328,6 +326,11 @@ export function InvestmentDashboard() {
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const navigateView = (next: View) => {
+    setView(next);
+    window.history.replaceState(null, "", `#${next}`);
+    setMobileMenu(false);
+  };
 
   const load = async () => {
     try {
@@ -342,7 +345,12 @@ export function InvestmentDashboard() {
     }
   };
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => {
+      void load();
+      const requested = window.location.hash.slice(1) as View;
+      if (navItems.some((item) => item.id === requested)) setView(requested);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const submit = async (
@@ -390,7 +398,13 @@ export function InvestmentDashboard() {
     view === "overview" ? (
       <Overview data={data} onEntry={() => setModal("entry")} />
     ) : view === "accounts" ? (
-      <Accounts data={data} onAccount={() => setModal("account")} />
+      <Accounts
+        data={data}
+        onAccount={() => setModal("account")}
+        onDelete={(id) =>
+          void submit({ action: "deleteAccount", id }, "账户已删除")
+        }
+      />
     ) : view === "ledger" ? (
       <Ledger
         data={data}
@@ -407,6 +421,9 @@ export function InvestmentDashboard() {
         onPlan={() => setModal("plan")}
         onDelete={(id) =>
           void submit({ action: "deletePlan", id }, "计划已删除")
+        }
+        onToggle={(id) =>
+          void submit({ action: "togglePlan", id }, "计划状态已更新")
         }
       />
     ) : view === "allocation" ? (
@@ -441,8 +458,7 @@ export function InvestmentDashboard() {
               key={id}
               className={view === id ? "active" : ""}
               onClick={() => {
-                setView(id);
-                setMobileMenu(false);
+                navigateView(id);
               }}
             >
               <Icon size={19} />
@@ -462,7 +478,7 @@ export function InvestmentDashboard() {
             XIRR 衡量个人资金回报
           </p>
         </div>
-        <button className="settings-link" onClick={() => setView("data")}>
+        <button className="settings-link" onClick={() => navigateView("data")}>
           <Settings2 size={18} />
           数据与设置
         </button>
@@ -499,16 +515,20 @@ export function InvestmentDashboard() {
       </main>
 
       <nav className="mobile-nav">
-        {navItems.slice(0, 5).map(({ id, label, icon: Icon }) => (
+        {navItems.slice(0, 4).map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             className={view === id ? "active" : ""}
-            onClick={() => setView(id)}
+            onClick={() => navigateView(id)}
           >
             <Icon size={19} />
             <span>{label}</span>
           </button>
         ))}
+        <button onClick={() => setMobileMenu(true)}>
+          <Menu size={19} />
+          <span>更多</span>
+        </button>
       </nav>
       <input
         ref={fileInput}
@@ -826,17 +846,43 @@ function PanelTitle({
 function Accounts({
   data,
   onAccount,
+  onDelete,
 }: {
   data: PortfolioData;
   onAccount: () => void;
+  onDelete: (id: number) => void;
 }) {
+  const [filter, setFilter] = useState<"ALL" | "PROFIT" | "LOSS">("ALL");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const accounts = data.accounts.filter((account) =>
+    filter === "ALL"
+      ? true
+      : filter === "PROFIT"
+        ? account.profit >= 0
+        : account.profit < 0,
+  );
   return (
     <div className="stack-page">
       <div className="section-actions">
         <div className="filter-pills">
-          <button className="active">全部账户</button>
-          <button>盈利</button>
-          <button>亏损</button>
+          <button
+            className={filter === "ALL" ? "active" : ""}
+            onClick={() => setFilter("ALL")}
+          >
+            全部账户
+          </button>
+          <button
+            className={filter === "PROFIT" ? "active" : ""}
+            onClick={() => setFilter("PROFIT")}
+          >
+            盈利
+          </button>
+          <button
+            className={filter === "LOSS" ? "active" : ""}
+            onClick={() => setFilter("LOSS")}
+          >
+            亏损
+          </button>
         </div>
         <button className="secondary-button" onClick={onAccount}>
           <Plus size={17} />
@@ -844,7 +890,7 @@ function Accounts({
         </button>
       </div>
       <div className="account-card-grid">
-        {data.accounts.map((account) => {
+        {accounts.map((account) => {
           const positions = data.holdings.filter(
             (item) => item.accountId === account.id,
           );
@@ -854,7 +900,15 @@ function Accounts({
                 <span style={{ background: account.color }}>
                   <Landmark size={19} />
                 </span>
-                <button aria-label="更多">
+                <button
+                  aria-label={
+                    expandedId === account.id ? "收起账户详情" : "展开账户详情"
+                  }
+                  title={expandedId === account.id ? "收起详情" : "查看详情"}
+                  onClick={() =>
+                    setExpandedId(expandedId === account.id ? null : account.id)
+                  }
+                >
                   <MoreHorizontal size={18} />
                 </button>
               </div>
@@ -887,6 +941,32 @@ function Accounts({
                   <span>暂无证券持仓</span>
                 )}
               </div>
+              {expandedId === account.id && (
+                <div className="account-detail">
+                  <div>
+                    <span>累计净投入</span>
+                    <strong>¥{money(account.contributions)}</strong>
+                  </div>
+                  <div>
+                    <span>持仓产品</span>
+                    <strong>{positions.length} 项</strong>
+                  </div>
+                  <p>该账户的买卖、费用和收益按移动加权成本独立核算。</p>
+                  <div className="account-detail-actions">
+                    <button
+                      className="text-danger"
+                      onClick={() =>
+                        confirm(
+                          `确认删除账户“${account.name}”？为保护历史数据，有流水或定投计划时系统会阻止删除。`,
+                        ) && onDelete(account.id)
+                      }
+                    >
+                      <Trash2 size={15} />
+                      删除账户
+                    </button>
+                  </div>
+                </div>
+              )}
             </article>
           );
         })}
@@ -913,21 +993,53 @@ function Ledger({
   onEntry: () => void;
   onDelete: (id: number) => void;
 }) {
-  const rows = useMemo(
-    () =>
-      data.ledger.filter((entry) => {
-        const instrument = data.instruments.find(
-          (item) => item.id === entry.instrument_id,
-        );
-        const account = data.accounts.find(
-          (item) => item.id === entry.account_id,
-        );
-        return `${instrument?.name ?? ""}${account?.name ?? ""}${entry.notes}${kindLabels[entry.kind] ?? entry.kind}`.includes(
-          search,
-        );
-      }),
-    [data, search],
-  );
+  const exportLedger = () => {
+    const header =
+      "日期,类型,账户,产品代码,产品名称,份额,价格,金额,手续费,税费,渠道,备注";
+    const lines = rows.map((entry) => {
+      const instrument = data.instruments.find(
+        (item) => item.id === entry.instrument_id,
+      );
+      const account = data.accounts.find(
+        (item) => item.id === entry.account_id,
+      );
+      const cells = [
+        entry.trade_date,
+        kindLabels[entry.kind] ?? entry.kind,
+        account?.name ?? "",
+        instrument?.code ?? "",
+        instrument?.name ?? "",
+        entry.quantity_units / 1_000_000,
+        entry.price_units / 1_000_000,
+        entry.gross_amount_units / 10_000,
+        entry.fee_units / 10_000,
+        entry.tax_units / 10_000,
+        channelLabels[entry.purchase_channel] ?? entry.purchase_channel,
+        entry.notes,
+      ];
+      return cells
+        .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+        .join(",");
+    });
+    const blob = new Blob(["\ufeff" + [header, ...lines].join("\n")], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `盈迹交易流水-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  const rows = data.ledger.filter((entry) => {
+    const instrument = data.instruments.find(
+      (item) => item.id === entry.instrument_id,
+    );
+    const account = data.accounts.find((item) => item.id === entry.account_id);
+    return `${instrument?.name ?? ""}${account?.name ?? ""}${entry.notes}${kindLabels[entry.kind] ?? entry.kind}`.includes(
+      search,
+    );
+  });
   return (
     <div className="stack-page">
       <div className="toolbar">
@@ -940,7 +1052,7 @@ function Ledger({
           />
         </label>
         <div>
-          <button className="secondary-button">
+          <button className="secondary-button" onClick={exportLedger}>
             <Download size={17} />
             导出
           </button>
@@ -1040,19 +1152,22 @@ function Plans({
   data,
   onPlan,
   onDelete,
+  onToggle,
 }: {
   data: PortfolioData;
   onPlan: () => void;
   onDelete: (id: number) => void;
+  onToggle: (id: number) => void;
 }) {
-  const monthlyAmount = data.plans.reduce((sum, plan) => sum + plan.amount, 0);
+  const activePlans = data.plans.filter((plan) => plan.status === "ACTIVE");
+  const monthlyAmount = activePlans.reduce((sum, plan) => sum + plan.amount, 0);
   return (
     <div className="stack-page">
       <section className="plan-summary">
         <div>
           <span>每月计划投入</span>
           <strong>¥ {money(monthlyAmount, 0)}</strong>
-          <p>{data.plans.length} 个计划正在运行</p>
+          <p>{activePlans.length} 个计划正在运行</p>
         </div>
         <div>
           <span>今年预计投入</span>
@@ -1071,7 +1186,11 @@ function Plans({
               <span style={{ background: COLORS[index % COLORS.length] }}>
                 <CalendarDays size={19} />
               </span>
-              <span className="status-badge">运行中</span>
+              <span
+                className={`status-badge ${plan.status === "ACTIVE" ? "" : "paused"}`}
+              >
+                {plan.status === "ACTIVE" ? "运行中" : "已暂停"}
+              </span>
             </div>
             <h2>{plan.instrumentName}</h2>
             <p>{plan.accountName}</p>
@@ -1099,16 +1218,24 @@ function Plans({
               </div>
               <small>到期后生成待确认任务，不会伪造成交</small>
             </div>
-            <button
-              className="text-danger"
-              onClick={() =>
-                confirm("删除这个定投计划？历史交易不会受影响。") &&
-                onDelete(plan.id)
-              }
-            >
-              <Trash2 size={15} />
-              删除计划
-            </button>
+            <div className="plan-actions">
+              <button
+                className="secondary-button"
+                onClick={() => onToggle(plan.id)}
+              >
+                {plan.status === "ACTIVE" ? "暂停计划" : "恢复计划"}
+              </button>
+              <button
+                className="text-danger"
+                onClick={() =>
+                  confirm("删除这个定投计划？历史交易不会受影响。") &&
+                  onDelete(plan.id)
+                }
+              >
+                <Trash2 size={15} />
+                删除计划
+              </button>
+            </div>
           </article>
         ))}
         <button className="add-plan-card" onClick={onPlan}>
@@ -1187,11 +1314,37 @@ function Allocation({
         </div>
       </section>
       <section className="panel">
-        <PanelTitle
-          title="目标与偏离"
-          subtitle="目标合计应为 100%"
-          action={`当前合计 ${totalTarget.toFixed(0)}%`}
-        />
+        <div className="panel-title-row">
+          <PanelTitle
+            title="目标与偏离"
+            subtitle="目标合计应为 100%"
+            action={`当前合计 ${totalTarget.toFixed(0)}%`}
+          />
+          <button
+            className="secondary-button"
+            disabled={Math.abs(totalTarget - 100) > 0.01}
+            onClick={() =>
+              void submit(
+                {
+                  action: "updateTargets",
+                  targets: data.instruments.map((instrument) => ({
+                    instrumentId: instrument.id,
+                    targetPercent: Number(
+                      drafts[instrument.id] ??
+                        (data.targets.find(
+                          (target) => target.instrument_id === instrument.id,
+                        )?.target_bps ?? 0) / 100,
+                    ),
+                  })),
+                },
+                "全部配置目标已保存",
+              )
+            }
+          >
+            <Check size={16} />
+            保存全部
+          </button>
+        </div>
         <div className="target-list">
           {data.instruments.map((instrument, index) => {
             const current = data.allocation.find(
@@ -1560,20 +1713,48 @@ function DataCenter({
           </div>
         </div>
       </section>
-      <section className="danger-zone">
-        <div>
-          <strong>恢复演示数据</strong>
-          <p>将清空当前账本并恢复初始示例。正式使用后请勿操作。</p>
+      <section className="panel instrument-panel">
+        <PanelTitle
+          title="产品与数据源"
+          subtitle="查看同步状态并更新真实基金数据"
+        />
+        <div className="instrument-list">
+          {data.instruments.map((instrument) => (
+            <div key={instrument.id}>
+              <div>
+                <strong>{instrument.name}</strong>
+                <span>
+                  {instrument.code} · {instrument.product_type} ·{" "}
+                  {instrument.data_source}
+                </span>
+              </div>
+              <div>
+                <span>
+                  标准费率 {(instrument.buy_fee_bps / 100).toFixed(2)}%
+                </span>
+                <span>
+                  第三方 {(instrument.eastmoney_fee_bps / 100).toFixed(2)}%
+                </span>
+              </div>
+              <button
+                className="secondary-button"
+                disabled={
+                  !/^\d{6}$/.test(instrument.code) ||
+                  !["FUND", "ETF"].includes(instrument.product_type)
+                }
+                onClick={() =>
+                  void submit(
+                    { action: "syncInstrument", instrumentId: instrument.id },
+                    `${instrument.name} 已同步`,
+                  )
+                }
+              >
+                <RefreshCcw size={15} />
+                同步数据
+              </button>
+            </div>
+          ))}
         </div>
-        <button
-          onClick={() =>
-            confirm("这会删除当前全部数据并恢复演示账本，确定继续？") &&
-            void submit({ action: "resetDemo" }, "演示数据已恢复")
-          }
-        >
-          <RefreshCcw size={16} />
-          恢复演示
-        </button>
       </section>
     </div>
   );
@@ -1626,9 +1807,78 @@ function ModalForm({
     setForm({ ...form, [key]: value });
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupNote, setLookupNote] = useState("");
-  const selectedInstrument = data.instruments.find(
-    (item) => item.id === Number(form.instrumentId),
-  );
+  const [resolvedInstrument, setResolvedInstrument] = useState<
+    PortfolioData["instruments"][number] | null
+  >(null);
+  const selectedInstrument =
+    data.instruments.find((item) => item.id === Number(form.instrumentId)) ??
+    (resolvedInstrument?.id === Number(form.instrumentId)
+      ? resolvedInstrument
+      : undefined);
+  useEffect(() => {
+    if (type !== "entry" || !["BUY", "SELL", "DIVIDEND"].includes(form.kind))
+      return;
+    const code = (form.instrumentCode ?? "").trim().toUpperCase();
+    const existing = data.instruments.find(
+      (item) => item.code.toUpperCase() === code,
+    );
+    const controller = new AbortController();
+    const timer = window.setTimeout(
+      async () => {
+        if (existing) {
+          setResolvedInstrument(null);
+          setLookupNote(`已匹配：${existing.name}`);
+          return;
+        }
+        setResolvedInstrument(null);
+        if (!/^\d{6}$/.test(code)) {
+          setLookupNote(code ? "请输入完整的 6 位基金或 ETF 代码" : "");
+          return;
+        }
+        setLookupBusy(true);
+        setLookupNote("正在自动匹配真实基金数据…");
+        try {
+          const response = await fetch("/api/portfolio", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "resolveInstrument", code }),
+            signal: controller.signal,
+          });
+          const result = (await response.json()) as {
+            error?: string;
+            instrument?: PortfolioData["instruments"][number];
+          };
+          if (!response.ok || !result.instrument)
+            throw new Error(result.error || "未查询到该基金代码");
+          setResolvedInstrument(result.instrument);
+          setForm((current) =>
+            current.instrumentCode === code
+              ? {
+                  ...current,
+                  instrumentId: String(result.instrument?.id ?? ""),
+                  fee: "",
+                }
+              : current,
+          );
+          setLookupNote(
+            `已自动匹配：${result.instrument.name} · ${result.instrument.product_type}`,
+          );
+        } catch (caught) {
+          if (!controller.signal.aborted)
+            setLookupNote(
+              caught instanceof Error ? caught.message : "查询失败",
+            );
+        } finally {
+          if (!controller.signal.aborted) setLookupBusy(false);
+        }
+      },
+      existing || !/^\d{6}$/.test(code) ? 0 : 450,
+    );
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [data.instruments, form.instrumentCode, form.kind, type]);
   const grossPreview =
     Number(form.amount || 0) ||
     Number(form.quantity || 0) * Number(form.price || 0);
@@ -1643,7 +1893,7 @@ function ModalForm({
       ? (selectedInstrument?.buy_discount_bps ?? 10_000)
       : 10_000;
   const estimatedFee = Math.max(
-    grossPreview * ((baseFeeBps * discountBps) / 10_000) / 10_000,
+    (grossPreview * ((baseFeeBps * discountBps) / 10_000)) / 10_000,
     baseFeeBps > 0 ? (selectedInstrument?.min_fee_units ?? 0) / 10_000 : 0,
   );
   const lookupFund = async () => {
@@ -1701,7 +1951,7 @@ function ModalForm({
       : type === "account"
         ? "创建投资账户"
         : type === "instrument"
-            ? "新增基金 / 证券"
+          ? "新增基金 / 证券"
           : type === "plan"
             ? "新建定投计划"
             : "更新价格 / 净值";
@@ -1792,6 +2042,16 @@ function ModalForm({
                           instrumentId: matched ? String(matched.id) : "",
                           fee: "",
                         }));
+                        setResolvedInstrument(null);
+                        setLookupNote(
+                          matched
+                            ? `已匹配：${matched.name}`
+                            : /^\d{6}$/.test(code)
+                              ? "正在自动匹配真实基金数据…"
+                              : code
+                                ? "请输入完整的 6 位基金或 ETF 代码"
+                                : "",
+                        );
                       }}
                     />
                     <datalist id="instrument-codes">
@@ -1802,9 +2062,12 @@ function ModalForm({
                       ))}
                     </datalist>
                     <small>
-                      {selectedInstrument
-                        ? `${selectedInstrument.name} · ${selectedInstrument.product_type}`
-                        : "代码未收录，请先在“新增基金/证券”中建立产品"}
+                      {lookupBusy
+                        ? "正在查询基金名称、净值和真实费率…"
+                        : lookupNote ||
+                          (selectedInstrument
+                            ? `${selectedInstrument.name} · ${selectedInstrument.product_type}`
+                            : "输入 6 位代码后自动匹配，无需预先新增产品")}
                     </small>
                   </Field>
                 )}
@@ -1886,7 +2149,8 @@ function ModalForm({
                       />
                       {!["DIVIDEND"].includes(form.kind) && (
                         <small>
-                          {form.kind === "SELL" && selectedInstrument?.redemption_fee_json !== "[]"
+                          {form.kind === "SELL" &&
+                          selectedInstrument?.redemption_fee_json !== "[]"
                             ? "留空后按真实赎回费率和 FIFO 持有期自动计算"
                             : `留空自动计算：预计 ¥${money(estimatedFee)}；填写后以实际费用为准`}
                         </small>

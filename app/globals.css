@@ -1779,3 +1779,258 @@ td small {
     color: var(--blue);
   }
 }
+
+/* Readability and interaction baseline for financial data. */
+body {
+  font-size: 14px;
+  line-height: 1.5;
+}
+.topbar h1 {
+  font-size: 22px;
+}
+.topbar p,
+.valuation-pill {
+  font-size: 13px;
+}
+.primary-button,
+.secondary-button,
+.ghost-button {
+  min-height: 42px;
+  font-size: 13px;
+}
+.panel-title h2 {
+  font-size: 16px;
+}
+.panel-title p,
+.panel-title > span {
+  font-size: 12px;
+}
+.eyebrow {
+  font-size: 12px;
+}
+.metric-top span,
+.metric-card small {
+  font-size: 12px;
+}
+.sidebar-status p,
+.brand small {
+  font-size: 11px;
+}
+.account-card h2,
+.plan-card h2,
+.data-card h2 {
+  font-size: 16px;
+}
+.account-card > p,
+.plan-card > p,
+.data-card p,
+.mini-holdings,
+.plan-summary span,
+.plan-summary p,
+.plan-amount span,
+.plan-date span,
+.plan-progress small,
+.allocation-hero p,
+.big-donut > div:last-child span,
+.audit-list p {
+  font-size: 12px;
+}
+.account-card-stats span,
+.target-name span,
+.target-bar small,
+.target-row > label,
+.ranking-list span,
+.risk-numbers span {
+  font-size: 11.5px;
+}
+.account-card-stats b,
+.plan-date strong,
+.target-name strong,
+.ranking-list strong,
+.audit-list strong {
+  font-size: 13px;
+}
+.filter-pills button {
+  min-height: 36px;
+  font-size: 13px;
+}
+.search-box {
+  min-height: 42px;
+}
+.search-box input {
+  font-size: 13px;
+}
+th {
+  font-size: 12px;
+}
+td,
+td strong {
+  font-size: 13px;
+}
+td small {
+  font-size: 11px;
+}
+.kind-badge,
+.status-badge {
+  font-size: 11px;
+}
+.text-danger {
+  min-height: 38px;
+  font-size: 12px;
+}
+.target-row input {
+  height: 40px;
+  font-size: 13px;
+}
+.rank {
+  font-size: 12px;
+}
+.form-grid label > span {
+  font-size: 13px;
+}
+.form-grid input,
+.form-grid select {
+  min-height: 44px;
+  font-size: 14px;
+}
+.form-grid small,
+.form-note {
+  font-size: 11.5px;
+}
+.segmented button {
+  min-height: 38px;
+  font-size: 12px;
+}
+.modal-head h2 {
+  font-size: 20px;
+}
+.recharts-text {
+  font-size: 11px;
+}
+
+.account-detail {
+  margin-top: 14px;
+  padding: 13px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  border-radius: 11px;
+  background: #f4f6fb;
+}
+.account-detail div {
+  display: grid;
+  gap: 3px;
+}
+.account-detail span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.account-detail strong {
+  font-size: 13px;
+}
+.account-detail p {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.account-detail-actions {
+  grid-column: 1 / -1;
+  display: flex !important;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid #e2e6ef;
+}
+.account-detail-actions .text-danger {
+  margin: 0;
+}
+.status-badge.paused {
+  color: #7a8292;
+  background: #eef0f4;
+}
+.plan-actions {
+  margin-top: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.plan-actions .secondary-button {
+  min-height: 36px;
+  padding-inline: 11px;
+}
+.plan-actions .text-danger {
+  margin: 0;
+}
+.panel-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.panel-title-row .panel-title {
+  flex: 1;
+  margin-bottom: 0;
+}
+.instrument-panel {
+  grid-column: 1 / -1;
+}
+.instrument-list {
+  display: grid;
+}
+.instrument-list > div {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 0;
+  border-bottom: 1px solid #eef0f4;
+}
+.instrument-list > div:last-child {
+  border-bottom: 0;
+}
+.instrument-list > div > div {
+  display: grid;
+  gap: 4px;
+}
+.instrument-list strong {
+  font-size: 14px;
+}
+.instrument-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (max-width: 680px) {
+  .topbar h1 {
+    font-size: 18px;
+  }
+  .panel-title-row {
+    display: grid;
+  }
+  .panel-title-row .secondary-button {
+    width: 100%;
+  }
+  .instrument-list > div {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .instrument-list .secondary-button {
+    width: 100%;
+  }
+  .mobile-nav button {
+    font-size: 10.5px;
+    min-width: 52px;
+  }
+  .account-card,
+  .plan-card,
+  .add-account-card,
+  .add-plan-card {
+    min-height: 0;
+  }
+}

@@ -146,7 +146,8 @@ export async function ensureDatabase() {
     try {
       await d1.prepare(statement).run();
     } catch (error) {
-      if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+      if (!String(error).toLowerCase().includes("duplicate column"))
+        throw error;
     }
   }
   const seeded = await d1
@@ -156,20 +157,4 @@ export async function ensureDatabase() {
   if (!seeded)
     await d1.batch(seedStatements.map((statement) => d1.prepare(statement)));
   initialized = true;
-}
-
-export async function resetDemoDatabase() {
-  const d1 = getD1();
-  await ensureDatabase();
-  const deletes = [
-    "ledger_entries",
-    "prices",
-    "recurring_plans",
-    "allocation_targets",
-    "instruments",
-    "accounts",
-    "app_meta",
-  ];
-  await d1.batch(deletes.map((table) => d1.prepare(`DELETE FROM ${table}`)));
-  await d1.batch(seedStatements.map((statement) => d1.prepare(statement)));
 }

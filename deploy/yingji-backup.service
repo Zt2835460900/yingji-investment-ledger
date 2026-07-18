@@ -1,0 +1,14 @@
+[Unit]
+Description=Back up Yingji investment ledger
+After=yingji.service
+Requires=yingji.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/yingji/current/deploy/backup-yingji.sh
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/backups/yingji

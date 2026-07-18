@@ -20,10 +20,116 @@ import type {
   PriceRow,
   TargetRow,
 } from "@/lib/types";
-import { ensureDatabase, resetDemoDatabase } from "@/db/bootstrap";
+import { ensureDatabase } from "@/db/bootstrap";
 import { getD1 } from "@/db";
 
 export const dynamic = "force-dynamic";
+
+const instrumentColumns =
+  "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
+
+const inferFundType = (code: string, name: string) =>
+  /ETF/i.test(name) || /^(5\d{5}|159\d{3})$/.test(code) ? "ETF" : "FUND";
+
+const inferAssetClass = (name: string) => {
+  if (/纳斯达克|标普|美国|美股/i.test(name)) return "美国股票";
+  if (/港股|恒生/i.test(name)) return "港股";
+  if (/债|固收/i.test(name)) return "债券";
+  return "中国股票";
+};
+
+async function syncFundInstrument(
+  d1: D1Database,
+  instrumentId: number,
+  code: string,
+) {
+  const live = await fetchLiveFundData(code);
+  await d1
+    .prepare(
+      "UPDATE instruments SET name = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+    )
+    .bind(
+      live.name,
+      live.standardBuyFeeBps,
+      live.eastmoneyBuyFeeBps,
+      decimalToUnits(live.minPurchase),
+      JSON.stringify(live.redemptionTiers),
+      live.source,
+      live.updatedAt,
+      instrumentId,
+    )
+    .run();
+  if (live.latestNav && live.latestNavDate)
+    await d1
+      .prepare(
+        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+      )
+      .bind(
+        instrumentId,
+        live.latestNavDate,
+        decimalToUnits(live.latestNav, PRICE_SCALE),
+      )
+      .run();
+  return live;
+}
+
+async function resolveFundInstrument(d1: D1Database, codeInput: string) {
+  const code = codeInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("请输入 6 位基金或 ETF 代码");
+  let instrument = await d1
+    .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+    .bind(code)
+    .first<InstrumentRow>();
+
+  if (instrument) {
+    try {
+      await syncFundInstrument(d1, instrument.id, code);
+      instrument = await d1
+        .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
+        .bind(instrument.id)
+        .first<InstrumentRow>();
+    } catch {
+      // 已收录的产品即使数据源临时不可用，也允许继续录入实际成交。
+    }
+    return instrument;
+  }
+
+  const live = await fetchLiveFundData(code);
+  await d1
+    .prepare(
+      "INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at) VALUES (?, ?, 'CN', ?, 'CNY', ?, ?, 10000, 0, 0, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      live.name.slice(0, 80),
+      code,
+      inferAssetClass(live.name),
+      inferFundType(code, live.name),
+      live.standardBuyFeeBps,
+      live.eastmoneyBuyFeeBps,
+      decimalToUnits(live.minPurchase),
+      JSON.stringify(live.redemptionTiers),
+      live.source,
+      live.updatedAt,
+    )
+    .run();
+  instrument = await d1
+    .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+    .bind(code)
+    .first<InstrumentRow>();
+  if (!instrument) throw new Error("基金资料保存失败");
+  if (live.latestNav && live.latestNavDate)
+    await d1
+      .prepare(
+        "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'EASTMONEY') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
+      )
+      .bind(
+        instrument.id,
+        live.latestNavDate,
+        decimalToUnits(live.latestNav, PRICE_SCALE),
+      )
+      .run();
+  return instrument;
+}
 
 async function loadPortfolio() {
   await ensureDatabase();
@@ -83,6 +189,15 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const origin = request.headers.get("origin");
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (
+    fetchSite === "cross-site" ||
+    (origin !== null && origin !== new URL(request.url).origin)
+  ) {
+    return Response.json({ error: "拒绝跨站数据操作" }, { status: 403 });
+  }
+
   try {
     await ensureDatabase();
     const d1 = getD1();
@@ -91,6 +206,14 @@ export async function POST(request: Request) {
 
     if (action === "lookupFund") {
       return Response.json(await fetchLiveFundData(String(body.code ?? "")));
+    }
+
+    if (action === "resolveInstrument") {
+      const instrument = await resolveFundInstrument(
+        d1,
+        String(body.code ?? ""),
+      );
+      return Response.json({ instrument });
     }
 
     if (action === "createEntry") {
@@ -145,7 +268,10 @@ export async function POST(request: Request) {
             redemption_fee_json: string;
           }>();
         if (!instrument) throw new Error("基金/证券代码不存在");
-        if (instrument.product_type === "FUND" && /^\d{6}$/.test(instrument.code)) {
+        if (
+          ["FUND", "ETF"].includes(instrument.product_type) &&
+          /^\d{6}$/.test(instrument.code)
+        ) {
           try {
             const live = await fetchLiveFundData(instrument.code);
             await d1
@@ -190,10 +316,18 @@ export async function POST(request: Request) {
               "SELECT kind, trade_date, quantity_units FROM ledger_entries WHERE account_id = ? AND instrument_id = ? AND trade_date <= ? AND kind IN ('BUY','SELL') ORDER BY trade_date, id",
             )
             .bind(accountId, instrumentId, tradeDate)
-            .all<{ kind: string; trade_date: string; quantity_units: number }>();
+            .all<{
+              kind: string;
+              trade_date: string;
+              quantity_units: number;
+            }>();
           const lots: Array<{ tradeDate: string; quantityUnits: number }> = [];
           for (const row of history.results) {
-            if (row.kind === "BUY") lots.push({ tradeDate: row.trade_date, quantityUnits: row.quantity_units });
+            if (row.kind === "BUY")
+              lots.push({
+                tradeDate: row.trade_date,
+                quantityUnits: row.quantity_units,
+              });
             else {
               let consumed = row.quantity_units;
               for (const lot of lots) {
@@ -224,7 +358,10 @@ export async function POST(request: Request) {
             sellFeeBps: instrument.sell_fee_bps,
             minFeeUnits: instrument.min_fee_units,
           });
-          feeSource = purchaseChannel === "EASTMONEY" ? "LIVE_EASTMONEY" : "LIVE_STANDARD";
+          feeSource =
+            purchaseChannel === "EASTMONEY"
+              ? "LIVE_EASTMONEY"
+              : "LIVE_STANDARD";
         }
       }
       if (kind === "SELL" && instrumentId) {
@@ -277,6 +414,35 @@ export async function POST(request: Request) {
         )
         .bind(name.slice(0, 50), String(body.color ?? "#5B7CFA"))
         .run();
+    } else if (action === "deleteAccount") {
+      const accountId = Number(body.id);
+      if (!Number.isInteger(accountId) || accountId <= 0)
+        throw new Error("账户不存在");
+      const [entryUsage, planUsage] = await Promise.all([
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM ledger_entries WHERE account_id = ?",
+          )
+          .bind(accountId)
+          .first<{ count: number }>(),
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM recurring_plans WHERE account_id = ?",
+          )
+          .bind(accountId)
+          .first<{ count: number }>(),
+      ]);
+      const entryCount = Number(entryUsage?.count ?? 0);
+      const planCount = Number(planUsage?.count ?? 0);
+      if (entryCount || planCount)
+        throw new Error(
+          `为保护历史数据，请先删除该账户的 ${entryCount} 条流水和 ${planCount} 个定投计划`,
+        );
+      const deleted = await d1
+        .prepare("DELETE FROM accounts WHERE id = ?")
+        .bind(accountId)
+        .run();
+      if (!Number(deleted.meta.changes ?? 0)) throw new Error("账户不存在");
     } else if (action === "createInstrument") {
       const name = String(body.name ?? "").trim();
       const code = String(body.code ?? "")
@@ -342,6 +508,15 @@ export async function POST(request: Request) {
           isoDate(body.nextDate),
         )
         .run();
+    } else if (action === "togglePlan") {
+      const planId = Number(body.id);
+      if (!Number.isInteger(planId)) throw new Error("定投计划不存在");
+      await d1
+        .prepare(
+          "UPDATE recurring_plans SET status = CASE WHEN status = 'ACTIVE' THEN 'PAUSED' ELSE 'ACTIVE' END WHERE id = ?",
+        )
+        .bind(planId)
+        .run();
     } else if (action === "updateTarget") {
       const instrumentId = Number(body.instrumentId);
       const targetBps = Math.round(Number(body.targetPercent) * 100);
@@ -352,6 +527,54 @@ export async function POST(request: Request) {
         )
         .bind(instrumentId, targetBps, alertBps)
         .run();
+    } else if (action === "updateTargets") {
+      const targets = Array.isArray(body.targets)
+        ? (body.targets.slice(0, 100) as Array<Record<string, unknown>>)
+        : [];
+      if (!targets.length) throw new Error("没有可保存的配置目标");
+      const invalidTarget = targets.some((target) => {
+        const instrumentId = Number(target.instrumentId);
+        const targetPercent = Number(target.targetPercent);
+        return (
+          !Number.isInteger(instrumentId) ||
+          instrumentId <= 0 ||
+          !Number.isFinite(targetPercent) ||
+          targetPercent < 0 ||
+          targetPercent > 100
+        );
+      });
+      if (invalidTarget) throw new Error("配置目标数据无效");
+      const total = targets.reduce(
+        (sum, target) => sum + Number(target.targetPercent ?? 0),
+        0,
+      );
+      if (Math.abs(total - 100) > 0.01)
+        throw new Error("配置目标合计必须等于 100%");
+      await d1.batch(
+        targets.map((target) =>
+          d1
+            .prepare(
+              "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, 500) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps, alert_bps = excluded.alert_bps",
+            )
+            .bind(
+              Number(target.instrumentId),
+              Math.round(Number(target.targetPercent) * 100),
+            ),
+        ),
+      );
+    } else if (action === "syncInstrument") {
+      const instrumentId = Number(body.instrumentId);
+      const instrument = await d1
+        .prepare("SELECT code, product_type FROM instruments WHERE id = ?")
+        .bind(instrumentId)
+        .first<{ code: string; product_type: string }>();
+      if (!instrument) throw new Error("投资产品不存在");
+      if (
+        !["FUND", "ETF"].includes(instrument.product_type) ||
+        !/^\d{6}$/.test(instrument.code)
+      )
+        throw new Error("只有 6 位代码的基金或 ETF 支持自动同步");
+      await syncFundInstrument(d1, instrumentId, instrument.code);
     } else if (action === "upsertPrice") {
       await d1
         .prepare(
@@ -390,10 +613,7 @@ export async function POST(request: Request) {
         ]),
       );
       const instrumentMap = new Map(
-        instruments.results.map((row) => [
-          row.code.toUpperCase(),
-          row,
-        ]),
+        instruments.results.map((row) => [row.code.toUpperCase(), row]),
       );
       const statements = rows.map((row, index) => {
         const accountId = accountMap.get(String(row.accountName ?? ""));
@@ -460,8 +680,6 @@ export async function POST(request: Request) {
         .prepare("DELETE FROM recurring_plans WHERE id = ?")
         .bind(Number(body.id))
         .run();
-    } else if (action === "resetDemo") {
-      await resetDemoDatabase();
     } else {
       throw new Error("未知操作");
     }
