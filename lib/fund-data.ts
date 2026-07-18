@@ -160,18 +160,22 @@ export async function fetchLiveFundData(
   const quoteDate = quoteDateInput.trim();
   if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
     throw new Error("净值查询日期格式不正确");
+  const signal = AbortSignal.timeout(10_000);
   const [scriptResponse, feeResponse, profileResponse] = await Promise.all([
     fetch(
       `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
       {
         headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+        signal,
       },
     ),
     fetch(`https://fundf10.eastmoney.com/jjfl_${code}.html`, {
       headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+      signal,
     }),
     fetch(`https://fundf10.eastmoney.com/jbgk_${code}.html`, {
       headers: { "User-Agent": "Yingji/1.0 personal-ledger" },
+      signal,
     }),
   ]);
   if (!scriptResponse.ok) throw new Error("未查询到该基金代码");

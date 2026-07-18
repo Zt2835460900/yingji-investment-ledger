@@ -312,13 +312,19 @@ export async function POST(request: Request) {
         .prepare(`SELECT ${instrumentColumns} FROM instruments ORDER BY id`)
         .all<InstrumentRow>();
       let synced = 0;
-      for (const instrument of instruments.results) {
-        if (!/^\d{6}$/.test(instrument.code)) continue;
-        try {
-          await syncFundInstrument(d1, instrument.id, instrument.code);
-          synced += 1;
-        } catch {
-          // One unavailable product must not block the rest of the catalog.
+      const syncable = instruments.results.filter((instrument) =>
+        /^\d{6}$/.test(instrument.code),
+      );
+      for (let index = 0; index < syncable.length; index += 2) {
+        const batch = await Promise.allSettled(
+          syncable
+            .slice(index, index + 2)
+            .map((instrument) =>
+              syncFundInstrument(d1, instrument.id, instrument.code),
+            ),
+        );
+        for (const result of batch) {
+          if (result.status === "fulfilled") synced += 1;
         }
       }
       return Response.json({
