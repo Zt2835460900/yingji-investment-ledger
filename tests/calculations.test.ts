@@ -3,6 +3,8 @@ import test from "node:test";
 import { calculatePortfolio, calculateXirr } from "../lib/calculations";
 import { calculateTradingFeeUnits } from "../lib/fees";
 import { calculateFifoRedemptionFeeUnits } from "../lib/fees";
+import { classifyFund, parseFundCategory } from "../lib/fund-data";
+import { classifyMarketNews } from "../lib/market-news";
 import {
   decimalToUnits,
   MONEY_SCALE,
@@ -42,6 +44,36 @@ test("scaled integer helpers avoid floating-point storage drift", () => {
     tradeGrossUnits(1 * QUANTITY_SCALE, 2_846_000),
     2.846 * MONEY_SCALE,
   );
+});
+
+test("fund profile parsing and classification use the published category", () => {
+  const profile =
+    "<tr><th>基金代码</th><td>001513（前端）<th>基金类型</th><td>混合型-偏股</td></tr>";
+  const category = parseFundCategory(profile);
+  assert.equal(category, "混合型-偏股");
+  assert.deepEqual(classifyFund("001513", "易方达信息产业混合A", category), {
+    productType: "FUND",
+    assetClass: "中国股票",
+    confirmationBusinessDays: 1,
+  });
+});
+
+test("ETF links stay off-exchange funds while listed ETFs are classified correctly", () => {
+  assert.equal(
+    classifyFund("012708", "广发纳斯达克100ETF联接A", "QDII-指数型")
+      .productType,
+    "FUND",
+  );
+  assert.deepEqual(classifyFund("513100", "纳指ETF", "指数型-海外股票"), {
+    productType: "ETF",
+    assetClass: "美国股票",
+    confirmationBusinessDays: 0,
+  });
+});
+
+test("market news is grouped into ETF and overseas sections", () => {
+  assert.equal(classifyMarketNews("超2100亿元资金借道ETF进场扫货"), "基金ETF");
+  assert.equal(classifyMarketNews("美股三大指数收跌，纳指跌超1%"), "海外市场");
 });
 
 test("fund subscription fee applies platform discount and exact rounding", () => {

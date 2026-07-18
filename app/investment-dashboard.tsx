@@ -11,6 +11,7 @@ import {
   CircleDollarSign,
   Database,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   Gauge,
   Home,
@@ -18,6 +19,7 @@ import {
   Layers3,
   Menu,
   MoreHorizontal,
+  Newspaper,
   Plus,
   RefreshCcw,
   Search,
@@ -182,6 +184,23 @@ interface PortfolioData {
   methodology: string;
 }
 
+interface MarketNewsFeed {
+  items: Array<{
+    id: string;
+    title: string;
+    summary: string;
+    publishedAt: string;
+    source: string;
+    url: string;
+    category: "A股" | "海外市场" | "基金ETF" | "宏观";
+  }>;
+  updatedAt: string;
+  source: string;
+  isLive: boolean;
+  isToday: boolean;
+  message: string;
+}
+
 const navItems: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "overview", label: "总览", icon: Home },
   { id: "accounts", label: "账户", icon: WalletCards },
@@ -231,6 +250,52 @@ const percent = (value: number | null, digits = 2) =>
     : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`;
 const dateText = (value: string | null) =>
   value ? value.replaceAll("-", ".") : "暂无估值";
+
+const addBusinessDays = (dateTextValue: string, businessDays: number) => {
+  const date = new Date(`${dateTextValue}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return "";
+  let remaining = Math.max(0, businessDays);
+  while (remaining > 0) {
+    date.setDate(date.getDate() + 1);
+    if (date.getDay() !== 0 && date.getDay() !== 6) remaining -= 1;
+  }
+  return date.toISOString().slice(0, 10);
+};
+
+const matchingAccount = (
+  accounts: PortfolioData["accounts"],
+  instrument: PortfolioData["instruments"][number],
+) => {
+  const product = `${instrument.name} ${instrument.asset_class}`;
+  const exactKeywords = ["纳斯达克", "标普", "恒生", "黄金", "债券"];
+  for (const keyword of exactKeywords) {
+    if (product.includes(keyword)) {
+      const exact = accounts.find((account) => account.name.includes(keyword));
+      if (exact) return exact;
+    }
+  }
+  const patterns: Array<[RegExp, RegExp]> = [
+    [/美国股票|美股|纳斯达克|标普/, /美国|美股|纳斯达克|标普/],
+    [/中国股票|A股/, /中国|A股|沪深|中证|科技/],
+    [/港股|香港|恒生/, /港股|香港|恒生/],
+    [/债券|固收/, /债券|固收/],
+    [/现金|货币/, /现金|货币/],
+  ];
+  for (const [productPattern, accountPattern] of patterns) {
+    if (productPattern.test(product)) {
+      const account = accounts.find((item) => accountPattern.test(item.name));
+      if (account) return account;
+    }
+  }
+  return null;
+};
+const productTypeLabel = (
+  instrument: PortfolioData["instruments"][number] | null | undefined,
+) =>
+  instrument?.product_type === "ETF" ||
+  /^(?:5\d{5}|159\d{3})$/.test(instrument?.code ?? "")
+    ? "场内 ETF"
+    : "场外基金";
 const navTitle: Record<View, [string, string]> = {
   overview: ["投资总览", "把现金流与投资表现分开看"],
   accounts: ["投资账户", "每个策略独立核算"],
@@ -321,6 +386,9 @@ export function InvestmentDashboard() {
   const [data, setData] = useState<PortfolioData | null>(null);
   const [view, setView] = useState<View>("overview");
   const [modal, setModal] = useState<Modal>(null);
+  const [editingPlan, setEditingPlan] = useState<
+    PortfolioData["plans"][number] | null
+  >(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -372,6 +440,7 @@ export function InvestmentDashboard() {
       if (!response.ok) throw new Error(result.error || "保存失败");
       setData(result);
       setModal(null);
+      setEditingPlan(null);
       setToast(success);
       window.setTimeout(() => setToast(""), 2600);
       return true;
@@ -419,7 +488,14 @@ export function InvestmentDashboard() {
     ) : view === "plans" ? (
       <Plans
         data={data}
-        onPlan={() => setModal("plan")}
+        onPlan={() => {
+          setEditingPlan(null);
+          setModal("plan");
+        }}
+        onEdit={(plan) => {
+          setEditingPlan(plan);
+          setModal("plan");
+        }}
         onDelete={(id) =>
           void submit({ action: "deletePlan", id }, "计划已删除")
         }
@@ -542,10 +618,12 @@ export function InvestmentDashboard() {
         <ModalForm
           type={modal}
           data={data}
+          editingPlan={editingPlan}
           busy={busy}
           error={error}
           onClose={() => {
             setModal(null);
+            setEditingPlan(null);
             setError("");
           }}
           submit={submit}
@@ -584,7 +662,11 @@ function Overview({
           <div>
             <span className="eyebrow">总资产</span>
             <strong>¥ {money(m.totalAssets)}</strong>
-            <p>累计净投入 ¥{money(m.netContributions)} · 当前现金已计入资产</p>
+            <div className="hero-cashflow" aria-label="资金概览">
+              <span>累计入金 ¥{money(m.deposits)}</span>
+              <span>累计出金 ¥{money(m.withdrawals)}</span>
+              <span>现金已计入总资产</span>
+            </div>
           </div>
           <button className="ghost-button" onClick={onEntry}>
             <Plus size={17} />
@@ -592,6 +674,10 @@ function Overview({
           </button>
         </div>
         <div className="hero-stats">
+          <div>
+            <span>累计净投入</span>
+            <strong>¥{money(m.netContributions)}</strong>
+          </div>
           <div>
             <span>累计收益</span>
             <strong className={m.totalProfit >= 0 ? "up" : "down"}>
@@ -910,6 +996,12 @@ function Accounts({
           const positions = data.holdings.filter(
             (item) => item.accountId === account.id,
           );
+          const primaryPosition = positions.length === 1 ? positions[0] : null;
+          const primaryInstrument = primaryPosition
+            ? data.instruments.find(
+                (item) => item.id === primaryPosition.instrumentId,
+              )
+            : null;
           return (
             <article className="account-card" key={account.id}>
               <div className="account-card-head">
@@ -949,8 +1041,14 @@ function Accounts({
                   </button>
                 </div>
               </div>
-              <h2>{account.name}</h2>
-              <p>基准币种 {account.currency} · 移动加权成本</p>
+              <h2>{primaryPosition?.instrumentName ?? account.name}</h2>
+              <p>
+                {primaryPosition
+                  ? `账户：${account.name} · ${primaryPosition.code} · ${productTypeLabel(
+                      primaryInstrument,
+                    )} · ${primaryInstrument?.asset_class ?? "其他"}`
+                  : `基准币种 ${account.currency} · 移动加权成本`}
+              </p>
               <strong>¥ {money(account.assets)}</strong>
               <div className="account-card-stats">
                 <div>
@@ -978,7 +1076,11 @@ function Accounts({
                 {positions.length ? (
                   positions.map((position) => (
                     <div key={position.instrumentId}>
-                      <span>{position.instrumentName}</span>
+                      <span>
+                        {primaryPosition
+                          ? `${position.code} · 当前持仓`
+                          : position.instrumentName}
+                      </span>
                       <b>{position.quantity.toFixed(2)} 份</b>
                     </div>
                   ))
@@ -1086,6 +1188,19 @@ function Ledger({
       search,
     );
   });
+  const buyTotal = rows
+    .filter((entry) => entry.kind === "BUY")
+    .reduce((sum, entry) => sum + entry.gross_amount_units / 10_000, 0);
+  const sellTotal = rows
+    .filter((entry) => entry.kind === "SELL")
+    .reduce((sum, entry) => sum + entry.gross_amount_units / 10_000, 0);
+  const expenseTotal = rows.reduce(
+    (sum, entry) =>
+      sum +
+      (entry.fee_units + entry.tax_units) / 10_000 +
+      (entry.kind === "FEE" ? entry.gross_amount_units / 10_000 : 0),
+    0,
+  );
   return (
     <div className="stack-page">
       <div className="toolbar">
@@ -1108,18 +1223,48 @@ function Ledger({
           </button>
         </div>
       </div>
+      <section className="ledger-summary" aria-label="流水摘要">
+        <div>
+          <span className="ledger-summary-icon neutral">
+            <Database size={18} />
+          </span>
+          <span>当前记录</span>
+          <strong>{rows.length} 笔</strong>
+        </div>
+        <div>
+          <span className="ledger-summary-icon buy">
+            <TrendingDown size={18} />
+          </span>
+          <span>累计买入</span>
+          <strong>¥{money(buyTotal)}</strong>
+        </div>
+        <div>
+          <span className="ledger-summary-icon sell">
+            <TrendingUp size={18} />
+          </span>
+          <span>累计卖出</span>
+          <strong>¥{money(sellTotal)}</strong>
+        </div>
+        <div>
+          <span className="ledger-summary-icon fee">
+            <CircleDollarSign size={18} />
+          </span>
+          <span>累计费用</span>
+          <strong>¥{money(expenseTotal)}</strong>
+        </div>
+      </section>
       <section className="panel table-panel">
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>日期</th>
-                <th>类型</th>
-                <th>账户 / 产品</th>
-                <th>份额</th>
-                <th>价格</th>
-                <th>金额</th>
-                <th>费用</th>
+                <th>交易 / 确认日期</th>
+                <th>交易类型</th>
+                <th>账户与产品</th>
+                <th className="numeric-heading">成交份额</th>
+                <th className="numeric-heading">成交价格</th>
+                <th className="numeric-heading">交易金额</th>
+                <th className="numeric-heading">手续费 / 税费</th>
                 <th></th>
               </tr>
             </thead>
@@ -1133,44 +1278,54 @@ function Ledger({
                 );
                 return (
                   <tr key={entry.id}>
-                    <td>
-                      {entry.trade_date}
-                      {entry.confirmation_date && (
-                        <small>确认 {entry.confirmation_date}</small>
-                      )}
+                    <td data-label="交易日期">
+                      <div className="ledger-cell-stack">
+                        <strong>{entry.trade_date}</strong>
+                        {entry.confirmation_date && (
+                          <small>确认 {entry.confirmation_date}</small>
+                        )}
+                      </div>
                     </td>
-                    <td>
+                    <td data-label="交易类型">
                       <span
                         className={`kind-badge ${entry.kind.toLowerCase()}`}
                       >
                         {kindLabels[entry.kind] ?? entry.kind}
                       </span>
                     </td>
-                    <td>
-                      <strong>{instrument?.name ?? account?.name}</strong>
-                      <small>
-                        {instrument
-                          ? `${account?.name} · ${instrument.code} · ${channelLabels[entry.purchase_channel] ?? entry.purchase_channel}`
-                          : entry.notes || "外部资金流"}
-                      </small>
+                    <td data-label="账户与产品" className="ledger-product-cell">
+                      <div className="ledger-cell-stack">
+                        <strong>{instrument?.name ?? account?.name}</strong>
+                        <small>
+                          {instrument
+                            ? `${account?.name} · ${instrument.code} · ${channelLabels[entry.purchase_channel] ?? entry.purchase_channel}`
+                            : entry.notes || "外部资金流"}
+                        </small>
+                      </div>
                     </td>
-                    <td>
+                    <td data-label="成交份额" className="numeric-cell">
                       {entry.quantity_units
                         ? money(entry.quantity_units / 1_000_000, 2)
                         : "—"}
                     </td>
-                    <td>
+                    <td data-label="成交价格" className="numeric-cell">
                       {entry.price_units
                         ? `¥${money(entry.price_units / 1_000_000, 4)}`
                         : "—"}
                     </td>
-                    <td className="number-cell">
+                    <td
+                      data-label="交易金额"
+                      className="number-cell numeric-cell"
+                    >
                       ¥{money(entry.gross_amount_units / 10_000)}
                     </td>
-                    <td>
+                    <td
+                      data-label="手续费 / 税费"
+                      className="numeric-cell fee-cell"
+                    >
                       ¥{money((entry.fee_units + entry.tax_units) / 10_000)}
                     </td>
-                    <td>
+                    <td className="ledger-row-action">
                       <button
                         className="icon-button danger"
                         aria-label="删除流水"
@@ -1202,11 +1357,13 @@ function Ledger({
 function Plans({
   data,
   onPlan,
+  onEdit,
   onDelete,
   onToggle,
 }: {
   data: PortfolioData;
   onPlan: () => void;
+  onEdit: (plan: PortfolioData["plans"][number]) => void;
   onDelete: (id: number) => void;
   onToggle: (id: number) => void;
 }) {
@@ -1216,12 +1373,16 @@ function Plans({
     <div className="stack-page">
       <section className="plan-summary">
         <div>
-          <span>每月计划投入</span>
+          <span>
+            <WalletCards size={16} /> 每月计划投入
+          </span>
           <strong>¥ {money(monthlyAmount, 0)}</strong>
           <p>{activePlans.length} 个计划正在运行</p>
         </div>
         <div>
-          <span>今年预计投入</span>
+          <span>
+            <CalendarDays size={16} /> 今年预计投入
+          </span>
           <strong>¥ {money(monthlyAmount * 12, 0)}</strong>
           <p>按当前计划估算</p>
         </div>
@@ -1231,64 +1392,96 @@ function Plans({
         </button>
       </section>
       <div className="plan-grid">
-        {data.plans.map((plan, index) => (
-          <article className="plan-card" key={plan.id}>
-            <div className="plan-card-head">
-              <span style={{ background: COLORS[index % COLORS.length] }}>
-                <CalendarDays size={19} />
-              </span>
-              <span
-                className={`status-badge ${plan.status === "ACTIVE" ? "" : "paused"}`}
-              >
-                {plan.status === "ACTIVE" ? "运行中" : "已暂停"}
-              </span>
-            </div>
-            <h2>{plan.instrumentName}</h2>
-            <p>{plan.accountName}</p>
-            <div className="plan-amount">
-              <strong>¥{money(plan.amount, 0)}</strong>
-              <span>/ 每月</span>
-            </div>
-            <div className="plan-date">
-              <div>
-                <span>下一期</span>
-                <strong>{plan.next_date}</strong>
-              </div>
-              <div>
-                <span>执行日</span>
-                <strong>每月 {plan.day_of_month} 日</strong>
-              </div>
-            </div>
-            <div className="plan-progress">
-              <div>
+        {data.plans.map((plan, index) => {
+          const instrument = data.instruments.find(
+            (item) => item.id === plan.instrument_id,
+          );
+          const accent = COLORS[index % COLORS.length];
+          return (
+            <article
+              className="plan-card"
+              key={plan.id}
+              style={{ borderTopColor: accent }}
+            >
+              <div className="plan-card-head">
+                <span style={{ background: accent }}>
+                  <CalendarDays size={20} />
+                </span>
                 <span
-                  style={{
-                    width: `${Math.min(100, (plan.day_of_month / 28) * 100)}%`,
-                  }}
-                />
+                  className={`status-badge ${plan.status === "ACTIVE" ? "" : "paused"}`}
+                >
+                  {plan.status === "ACTIVE" ? "运行中" : "已暂停"}
+                </span>
               </div>
-              <small>到期后生成待确认任务，不会伪造成交</small>
-            </div>
-            <div className="plan-actions">
-              <button
-                className="secondary-button"
-                onClick={() => onToggle(plan.id)}
-              >
-                {plan.status === "ACTIVE" ? "暂停计划" : "恢复计划"}
-              </button>
-              <button
-                className="text-danger"
-                onClick={() =>
-                  confirm("删除这个定投计划？历史交易不会受影响。") &&
-                  onDelete(plan.id)
-                }
-              >
-                <Trash2 size={15} />
-                删除计划
-              </button>
-            </div>
-          </article>
-        ))}
+              <div className="plan-card-title">
+                <h2>{plan.instrumentName}</h2>
+                <div className="plan-tags">
+                  {instrument?.code && <span>{instrument.code}</span>}
+                  {instrument?.asset_class && (
+                    <span>{instrument.asset_class}</span>
+                  )}
+                </div>
+              </div>
+              <div className="plan-account">
+                <Landmark size={15} />
+                <span>{plan.accountName}</span>
+              </div>
+              <div className="plan-amount">
+                <span>每月计划投入</span>
+                <div>
+                  <strong>¥{money(plan.amount, 0)}</strong>
+                  <small>/ 月</small>
+                </div>
+              </div>
+              <div className="plan-date">
+                <div>
+                  <span>下一期</span>
+                  <strong>{plan.next_date}</strong>
+                </div>
+                <div>
+                  <span>固定执行日</span>
+                  <strong>每月 {plan.day_of_month} 日</strong>
+                </div>
+              </div>
+              <div className="plan-progress">
+                <div>
+                  <span
+                    style={{
+                      width: `${Math.min(100, (plan.day_of_month / 28) * 100)}%`,
+                      background: accent,
+                    }}
+                  />
+                </div>
+                <small>到期后生成待确认任务，不会伪造成交</small>
+              </div>
+              <div className="plan-actions">
+                <button
+                  className="secondary-button plan-edit-button"
+                  onClick={() => onEdit(plan)}
+                >
+                  <Settings2 size={16} />
+                  编辑
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() => onToggle(plan.id)}
+                >
+                  {plan.status === "ACTIVE" ? "暂停" : "恢复"}
+                </button>
+                <button
+                  className="text-danger"
+                  onClick={() =>
+                    confirm("删除这个定投计划？历史交易不会受影响。") &&
+                    onDelete(plan.id)
+                  }
+                >
+                  <Trash2 size={16} />
+                  删除
+                </button>
+              </div>
+            </article>
+          );
+        })}
         <button className="add-plan-card" onClick={onPlan}>
           <Plus size={24} />
           <strong>添加定投计划</strong>
@@ -1475,8 +1668,118 @@ function Allocation({
 }
 
 function Analytics({ data }: { data: PortfolioData }) {
+  const [news, setNews] = useState<MarketNewsFeed | null>(null);
+  const [newsLoading, setNewsLoading] = useState(true);
+  const loadNews = async (force = false) => {
+    setNewsLoading(true);
+    try {
+      const response = await fetch(
+        `/api/market-news${force ? "?refresh=1" : ""}`,
+        { cache: "no-store" },
+      );
+      const result = (await response.json()) as MarketNewsFeed;
+      if (!response.ok) throw new Error("市场资讯读取失败");
+      setNews(result);
+    } catch (caught) {
+      setNews({
+        items: [],
+        updatedAt: new Date().toISOString(),
+        source: "东方财富网财经导读",
+        isLive: false,
+        isToday: false,
+        message: caught instanceof Error ? caught.message : "市场资讯读取失败",
+      });
+    } finally {
+      setNewsLoading(false);
+    }
+  };
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadNews(), 0);
+    const refresh = window.setInterval(() => void loadNews(), 5 * 60 * 1000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(refresh);
+    };
+  }, []);
+
   return (
     <div className="analytics-page">
+      <section className="panel market-news-panel">
+        <div className="market-news-head">
+          <div className="market-news-heading">
+            <span className="market-news-mark">
+              <Newspaper size={22} />
+            </span>
+            <div>
+              <div className="market-news-title-line">
+                <h2>今日市场资讯</h2>
+                <span
+                  className={`news-live-badge ${news?.isLive ? "" : "offline"}`}
+                >
+                  <i /> {news?.isLive ? "自动更新" : "数据源异常"}
+                </span>
+              </div>
+              <p>
+                {news?.message ?? "正在获取国内、海外及基金 ETF 最新资讯"}
+                {news?.updatedAt
+                  ? ` · 更新于 ${new Date(news.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+                  : ""}
+              </p>
+            </div>
+          </div>
+          <button
+            className="secondary-button"
+            disabled={newsLoading}
+            onClick={() => void loadNews(true)}
+          >
+            <RefreshCcw size={17} className={newsLoading ? "spin" : ""} />
+            {newsLoading ? "更新中" : "立即更新"}
+          </button>
+        </div>
+        {newsLoading && !news ? (
+          <div className="news-loading-grid" aria-label="市场资讯加载中">
+            {Array.from({ length: 6 }, (_, index) => (
+              <span key={index} />
+            ))}
+          </div>
+        ) : news?.items.length ? (
+          <div className="market-news-grid">
+            {news.items.map((item) => (
+              <a
+                className={`market-news-card category-${item.category}`}
+                key={item.id}
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <div className="news-card-meta">
+                  <span>{item.category}</span>
+                  <time>{item.publishedAt.slice(5, 16)}</time>
+                </div>
+                <h3>{item.title}</h3>
+                {item.summary && <p>{item.summary}</p>}
+                <div className="news-card-source">
+                  <span>{item.source}</span>
+                  <span>
+                    查看原文 <ExternalLink size={14} />
+                  </span>
+                </div>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="news-empty">
+            <AlertTriangle size={22} />
+            <strong>市场资讯暂时无法加载</strong>
+            <span>{news?.message}</span>
+            <button onClick={() => void loadNews(true)}>重新获取</button>
+          </div>
+        )}
+        <p className="news-disclaimer">
+          新闻标题与摘要来自 {news?.source ?? "财经公开资讯源"}
+          ，仅用于信息记录，不构成投资建议。
+        </p>
+      </section>
       <section className="metric-grid risk-grid">
         <MetricCard
           label="累计 TWR"
@@ -1988,6 +2291,7 @@ function LoginSecurityCard() {
 function ModalForm({
   type,
   data,
+  editingPlan,
   busy,
   error,
   onClose,
@@ -1995,22 +2299,41 @@ function ModalForm({
 }: {
   type: Exclude<Modal, null>;
   data: PortfolioData;
+  editingPlan: PortfolioData["plans"][number] | null;
   busy: boolean;
   error: string;
   onClose: () => void;
   submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
 }) {
   const today = new Date().toISOString().slice(0, 10);
+  const initialPlanInstrument = editingPlan
+    ? data.instruments.find((item) => item.id === editingPlan.instrument_id)
+    : data.instruments[0];
+  const initialPlanAccount = initialPlanInstrument
+    ? matchingAccount(data.accounts, initialPlanInstrument)
+    : null;
   const [form, setForm] = useState<Record<string, string>>({
     kind: "BUY",
-    accountId: String(data.accounts[0]?.id ?? ""),
-    instrumentId: String(data.instruments[0]?.id ?? ""),
+    accountId: String(
+      type === "plan"
+        ? (editingPlan?.account_id ??
+            initialPlanAccount?.id ??
+            data.accounts[0]?.id ??
+            "")
+        : (data.accounts[0]?.id ?? ""),
+    ),
+    instrumentId: String(
+      type === "plan"
+        ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
+        : (data.instruments[0]?.id ?? ""),
+    ),
     instrumentCode: data.instruments[0]?.code ?? "",
     tradeDate: today,
     confirmationDate: "",
     priceDate: today,
-    nextDate: today,
-    dayOfMonth: "5",
+    nextDate: editingPlan?.next_date ?? today,
+    dayOfMonth: String(editingPlan?.day_of_month ?? 5),
+    amount: editingPlan ? String(editingPlan.amount) : "",
     market: "CN",
     assetClass: "美国股票",
     currency: "CNY",
@@ -2033,14 +2356,27 @@ function ModalForm({
     setForm({ ...form, [key]: value });
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupNote, setLookupNote] = useState("");
+  const [fundCategory, setFundCategory] = useState("");
+  const [quoteMeta, setQuoteMeta] = useState<{
+    price: number;
+    date: string;
+    isLive: boolean;
+  } | null>(null);
+  const [confirmationBusinessDays, setConfirmationBusinessDays] = useState<
+    number | null
+  >(null);
+  const [confirmationIsAuto, setConfirmationIsAuto] = useState(true);
+  const [priceIsAuto, setPriceIsAuto] = useState(true);
+  const [amountIsAuto, setAmountIsAuto] = useState(true);
+  const [feeIsAuto, setFeeIsAuto] = useState(true);
   const [resolvedInstrument, setResolvedInstrument] = useState<
     PortfolioData["instruments"][number] | null
   >(null);
   const selectedInstrument =
-    data.instruments.find((item) => item.id === Number(form.instrumentId)) ??
     (resolvedInstrument?.id === Number(form.instrumentId)
       ? resolvedInstrument
-      : undefined);
+      : undefined) ??
+    data.instruments.find((item) => item.id === Number(form.instrumentId));
   useEffect(() => {
     if (type !== "entry" || !["BUY", "SELL", "DIVIDEND"].includes(form.kind))
       return;
@@ -2051,13 +2387,19 @@ function ModalForm({
     const controller = new AbortController();
     const timer = window.setTimeout(
       async () => {
-        if (existing) {
+        if (existing && !["FUND", "ETF"].includes(existing.product_type)) {
           setResolvedInstrument(null);
-          setLookupNote(`已匹配：${existing.name}`);
+          setQuoteMeta(null);
+          setFundCategory("");
+          setConfirmationBusinessDays(null);
+          setLookupNote(`已匹配：${existing.name} · ${existing.asset_class}`);
           return;
         }
         setResolvedInstrument(null);
         if (!/^\d{6}$/.test(code)) {
+          setQuoteMeta(null);
+          setFundCategory("");
+          setConfirmationBusinessDays(null);
           setLookupNote(code ? "请输入完整的 6 位基金或 ETF 代码" : "");
           return;
         }
@@ -2073,21 +2415,55 @@ function ModalForm({
           const result = (await response.json()) as {
             error?: string;
             instrument?: PortfolioData["instruments"][number];
+            latestNav?: number;
+            latestNavDate?: string;
+            fundCategory?: string;
+            confirmationBusinessDays?: number;
+            quoteSource?: string;
+            isLive?: boolean;
           };
           if (!response.ok || !result.instrument)
             throw new Error(result.error || "未查询到该基金代码");
           setResolvedInstrument(result.instrument);
+          setFundCategory(result.fundCategory ?? "");
+          setConfirmationBusinessDays(
+            result.confirmationBusinessDays ??
+              (result.instrument.product_type === "ETF" ? 0 : 1),
+          );
+          setQuoteMeta(
+            result.latestNav && result.latestNavDate
+              ? {
+                  price: result.latestNav,
+                  date: result.latestNavDate,
+                  isLive: result.isLive !== false,
+                }
+              : null,
+          );
+          const account = matchingAccount(data.accounts, result.instrument);
           setForm((current) =>
             current.instrumentCode === code
               ? {
                   ...current,
                   instrumentId: String(result.instrument?.id ?? ""),
+                  accountId:
+                    current.kind === "BUY" && account
+                      ? String(account.id)
+                      : current.accountId,
+                  price: result.latestNav
+                    ? String(result.latestNav)
+                    : current.price,
                   fee: "",
+                  tax:
+                    ["FUND", "ETF"].includes(
+                      result.instrument?.product_type ?? "",
+                    ) && !current.tax
+                      ? "0.00"
+                      : current.tax,
                 }
               : current,
           );
           setLookupNote(
-            `已自动匹配：${result.instrument.name} · ${result.instrument.product_type}`,
+            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${account ? `；账户已匹配为 ${account.name}` : ""}`,
           );
         } catch (caught) {
           if (!controller.signal.aborted)
@@ -2098,16 +2474,17 @@ function ModalForm({
           if (!controller.signal.aborted) setLookupBusy(false);
         }
       },
-      existing || !/^\d{6}$/.test(code) ? 0 : 450,
+      !/^\d{6}$/.test(code) ? 0 : existing ? 120 : 450,
     );
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [data.instruments, form.instrumentCode, form.kind, type]);
-  const grossPreview =
-    Number(form.amount || 0) ||
-    Number(form.quantity || 0) * Number(form.price || 0);
+  }, [data.accounts, data.instruments, form.instrumentCode, form.kind, type]);
+  const calculatedAmount = Number(form.quantity || 0) * Number(form.price || 0);
+  const grossPreview = amountIsAuto
+    ? calculatedAmount
+    : Number(form.amount || 0);
   const baseFeeBps =
     form.kind === "BUY"
       ? form.purchaseChannel === "EASTMONEY"
@@ -2122,9 +2499,26 @@ function ModalForm({
     (grossPreview * ((baseFeeBps * discountBps) / 10_000)) / 10_000,
     baseFeeBps > 0 ? (selectedInstrument?.min_fee_units ?? 0) / 10_000 : 0,
   );
-  const lookupFund = async () => {
-    if (!/^\d{6}$/.test(form.code ?? "")) {
-      setLookupNote("请输入 6 位场外基金代码");
+  const displayedAmount =
+    amountIsAuto && ["BUY", "SELL"].includes(form.kind)
+      ? calculatedAmount > 0
+        ? calculatedAmount.toFixed(2)
+        : ""
+      : (form.amount ?? "");
+  const displayedConfirmationDate =
+    confirmationIsAuto && confirmationBusinessDays !== null
+      ? addBusinessDays(form.tradeDate, confirmationBusinessDays)
+      : (form.confirmationDate ?? "");
+  const displayedFee =
+    feeIsAuto && form.kind === "BUY"
+      ? grossPreview > 0 && selectedInstrument
+        ? estimatedFee.toFixed(2)
+        : ""
+      : (form.fee ?? "");
+  const lookupFund = async (codeOverride?: string) => {
+    const code = (codeOverride ?? form.code ?? "").trim();
+    if (!/^\d{6}$/.test(code)) {
+      setLookupNote("请输入 6 位基金或 ETF 代码");
       return;
     }
     setLookupBusy(true);
@@ -2133,11 +2527,14 @@ function ModalForm({
       const response = await fetch("/api/portfolio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "lookupFund", code: form.code }),
+        body: JSON.stringify({ action: "lookupFund", code }),
       });
       const result = (await response.json()) as {
         error?: string;
         name: string;
+        fundCategory: string;
+        productType: "FUND" | "ETF";
+        assetClass: string;
         standardBuyFeeBps: number;
         eastmoneyBuyFeeBps: number;
         minPurchase: number;
@@ -2151,7 +2548,8 @@ function ModalForm({
       setForm((current) => ({
         ...current,
         name: result.name,
-        productType: "FUND",
+        productType: result.productType,
+        assetClass: result.assetClass,
         buyFeePercent: String(result.standardBuyFeeBps / 100),
         buyDiscountPercent: "100",
         eastmoneyFeePercent: String(result.eastmoneyBuyFeeBps / 100),
@@ -2163,7 +2561,7 @@ function ModalForm({
         sourceUpdatedAt: result.updatedAt,
       }));
       setLookupNote(
-        `已同步：净值 ${result.latestNav || "—"}（${result.latestNavDate || "暂无日期"}），标准申购费 ${(result.standardBuyFeeBps / 100).toFixed(2)}%，天天基金 ${(result.eastmoneyBuyFeeBps / 100).toFixed(2)}%`,
+        `已同步：${result.fundCategory || result.productType} · ${result.assetClass}；净值 ${result.latestNav || "—"}（${result.latestNavDate || "暂无日期"}），标准申购费 ${(result.standardBuyFeeBps / 100).toFixed(2)}%，天天基金 ${(result.eastmoneyBuyFeeBps / 100).toFixed(2)}%`,
       );
     } catch (caught) {
       setLookupNote(caught instanceof Error ? caught.message : "查询失败");
@@ -2179,7 +2577,9 @@ function ModalForm({
         : type === "instrument"
           ? "新增基金 / 证券"
           : type === "plan"
-            ? "新建定投计划"
+            ? editingPlan
+              ? "编辑定投计划"
+              : "新建定投计划"
             : "更新价格 / 净值";
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -2191,11 +2591,27 @@ function ModalForm({
           : type === "instrument"
             ? "createInstrument"
             : type === "plan"
-              ? "createPlan"
+              ? editingPlan
+                ? "updatePlan"
+                : "createPlan"
               : "upsertPrice";
+    const payload: Record<string, unknown> = {
+      action,
+      ...form,
+      ...(editingPlan ? { id: editingPlan.id } : {}),
+    };
+    if (type === "entry" && ["BUY", "SELL"].includes(form.kind)) {
+      if (amountIsAuto) payload.amount = "";
+      if (feeIsAuto) payload.fee = "";
+      payload.confirmationDate = displayedConfirmationDate;
+    }
     await submit(
-      { action, ...form },
-      type === "entry" ? "流水已记入，收益已重算" : "已保存",
+      payload,
+      type === "entry"
+        ? "流水已记入，收益已重算"
+        : editingPlan
+          ? "定投计划已更新"
+          : "已保存",
     );
   };
   return (
@@ -2230,7 +2646,16 @@ function ModalForm({
                     type="button"
                     key={kind}
                     className={form.kind === kind ? "active" : ""}
-                    onClick={() => set("kind", kind)}
+                    onClick={() => {
+                      setForm((current) => ({
+                        ...current,
+                        kind,
+                        fee: "",
+                        confirmationDate: "",
+                      }));
+                      setFeeIsAuto(true);
+                      setConfirmationIsAuto(true);
+                    }}
                   >
                     {kindLabels[kind]}
                   </button>
@@ -2266,9 +2691,21 @@ function ModalForm({
                           ...current,
                           instrumentCode: code,
                           instrumentId: matched ? String(matched.id) : "",
+                          confirmationDate: "",
+                          quantity: "",
+                          price: "",
+                          amount: "",
                           fee: "",
+                          tax: "",
                         }));
+                        setConfirmationIsAuto(true);
+                        setPriceIsAuto(true);
+                        setAmountIsAuto(true);
+                        setFeeIsAuto(true);
                         setResolvedInstrument(null);
+                        setFundCategory("");
+                        setQuoteMeta(null);
+                        setConfirmationBusinessDays(null);
                         setLookupNote(
                           matched
                             ? `已匹配：${matched.name}`
@@ -2295,6 +2732,19 @@ function ModalForm({
                             ? `${selectedInstrument.name} · ${selectedInstrument.product_type}`
                             : "输入 6 位代码后自动匹配，无需预先新增产品")}
                     </small>
+                    {selectedInstrument && (
+                      <div className="classification-line">
+                        <span>
+                          {selectedInstrument.product_type === "ETF"
+                            ? "场内 ETF"
+                            : selectedInstrument.product_type === "FUND"
+                              ? "场外基金"
+                              : selectedInstrument.product_type}
+                        </span>
+                        <span>{selectedInstrument.asset_class}</span>
+                        {fundCategory && <span>{fundCategory}</span>}
+                      </div>
+                    )}
                   </Field>
                 )}
                 {["BUY", "SELL"].includes(form.kind) && (
@@ -2302,6 +2752,7 @@ function ModalForm({
                     <select
                       value={form.purchaseChannel}
                       onChange={(e) => {
+                        setFeeIsAuto(true);
                         setForm((current) => ({
                           ...current,
                           purchaseChannel: e.target.value,
@@ -2339,14 +2790,16 @@ function ModalForm({
                       <input
                         type="date"
                         min={form.tradeDate}
-                        value={form.confirmationDate}
-                        onChange={(e) =>
-                          set("confirmationDate", e.target.value)
-                        }
+                        value={displayedConfirmationDate}
+                        onChange={(e) => {
+                          setConfirmationIsAuto(false);
+                          set("confirmationDate", e.target.value);
+                        }}
                       />
                       <small>
-                        填写基金公司实际确认日期（常见
-                        T+1/T+2）；收益计算仍按交易日期
+                        {confirmationBusinessDays === null
+                          ? "匹配代码后自动估算，实际确认单可覆盖"
+                          : `已按 T+${confirmationBusinessDays} 工作日自动估算；节假日或基金规则不同请按确认单覆盖`}
                       </small>
                     </Field>
                   )}
@@ -2360,6 +2813,7 @@ function ModalForm({
                         value={form.quantity ?? ""}
                         onChange={(e) => set("quantity", e.target.value)}
                       />
+                      <small>份额属于个人成交数据，请按成交确认单填写</small>
                     </Field>
                     <Field label="成交价格 / 净值">
                       <input
@@ -2367,8 +2821,18 @@ function ModalForm({
                         inputMode="decimal"
                         placeholder="0.000000"
                         value={form.price ?? ""}
-                        onChange={(e) => set("price", e.target.value)}
+                        onChange={(e) => {
+                          setPriceIsAuto(false);
+                          set("price", e.target.value);
+                        }}
                       />
+                      <small>
+                        {quoteMeta && priceIsAuto
+                          ? `已带入最新可用净值 ${quoteMeta.price.toFixed(6)}（${quoteMeta.date}${quoteMeta.date === form.tradeDate ? "，当日" : "，非当前交易日"}${quoteMeta.isLive ? "" : "，缓存"}）；实际确认净值可覆盖`
+                          : quoteMeta
+                            ? "已使用手工净值；重新输入代码可恢复自动带入"
+                            : "匹配代码后自动带入最新可用净值"}
+                      </small>
                     </Field>
                   </>
                 )}
@@ -2379,10 +2843,17 @@ function ModalForm({
                     required={!["BUY", "SELL"].includes(form.kind)}
                     inputMode="decimal"
                     placeholder="0.00"
-                    value={form.amount ?? ""}
-                    onChange={(e) => set("amount", e.target.value)}
+                    value={displayedAmount}
+                    onChange={(e) => {
+                      setAmountIsAuto(!e.target.value.trim());
+                      set("amount", e.target.value);
+                    }}
                   />
-                  <small>买卖可留空，由份额 × 价格计算</small>
+                  <small>
+                    {amountIsAuto
+                      ? "已按份额 × 净值自动计算；保存时服务器使用完整精度"
+                      : "已使用手工成交金额；清空可恢复自动计算"}
+                  </small>
                 </Field>
                 {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (
                   <>
@@ -2390,15 +2861,20 @@ function ModalForm({
                       <input
                         inputMode="decimal"
                         placeholder="0.00"
-                        value={form.fee ?? ""}
-                        onChange={(e) => set("fee", e.target.value)}
+                        value={displayedFee}
+                        onChange={(e) => {
+                          setFeeIsAuto(!e.target.value.trim());
+                          set("fee", e.target.value);
+                        }}
                       />
                       {!["DIVIDEND"].includes(form.kind) && (
                         <small>
                           {form.kind === "SELL" &&
                           selectedInstrument?.redemption_fee_json !== "[]"
                             ? "留空后按真实赎回费率和 FIFO 持有期自动计算"
-                            : `留空自动计算：预计 ¥${money(estimatedFee)}；填写后以实际费用为准`}
+                            : feeIsAuto
+                              ? `已自动填入预计 ¥${money(estimatedFee)}；保存时服务器按渠道实时费率重算`
+                              : "已使用手工手续费；清空可恢复自动计算"}
                         </small>
                       )}
                     </Field>
@@ -2463,7 +2939,11 @@ function ModalForm({
                   autoFocus
                   placeholder="例如：000001 或 510300"
                   value={form.code ?? ""}
-                  onChange={(e) => set("code", e.target.value.toUpperCase())}
+                  onChange={(e) => {
+                    const code = e.target.value.toUpperCase().trim();
+                    set("code", code);
+                    if (/^\d{6}$/.test(code)) void lookupFund(code);
+                  }}
                 />
                 <button
                   type="button"
@@ -2515,7 +2995,10 @@ function ModalForm({
                   <option>中国股票</option>
                   <option>港股</option>
                   <option>债券</option>
+                  <option>现金</option>
                   <option>现金类</option>
+                  <option>商品</option>
+                  <option>海外股票</option>
                   <option>其他</option>
                 </select>
               </Field>
@@ -2608,7 +3091,21 @@ function ModalForm({
               <Field label="投资产品">
                 <select
                   value={form.instrumentId}
-                  onChange={(e) => set("instrumentId", e.target.value)}
+                  onChange={(e) => {
+                    const instrument = data.instruments.find(
+                      (item) => item.id === Number(e.target.value),
+                    );
+                    const account = instrument
+                      ? matchingAccount(data.accounts, instrument)
+                      : null;
+                    setForm((current) => ({
+                      ...current,
+                      instrumentId: e.target.value,
+                      accountId: account
+                        ? String(account.id)
+                        : current.accountId,
+                    }));
+                  }}
                 >
                   {data.instruments.map((item) => (
                     <option key={item.id} value={item.id}>
@@ -2616,6 +3113,18 @@ function ModalForm({
                     </option>
                   ))}
                 </select>
+                <div className="plan-match-note">
+                  <strong>
+                    自动分类：
+                    {productTypeLabel(selectedInstrument)}
+                    {selectedInstrument?.asset_class
+                      ? ` · ${selectedInstrument.asset_class}`
+                      : ""}
+                  </strong>
+                  <span>
+                    选择产品后会按名称和资产类别自动匹配账户，仍可手工覆盖
+                  </span>
+                </div>
               </Field>
               <Field label="每月金额">
                 <input

@@ -2,7 +2,7 @@
 
 :root {
   --ink: #202638;
-  --muted: #788095;
+  --muted: #667187;
   --line: #e7eaf1;
   --surface: #ffffff;
   --canvas: #f4f6fa;
@@ -25,6 +25,7 @@ body {
   background: var(--canvas);
   color: var(--ink);
   font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
 }
 button,
 input,
@@ -262,7 +263,7 @@ select:focus-visible {
   gap: 18px;
 }
 .hero-balance {
-  min-height: 270px;
+  min-height: 288px;
   border-radius: 20px;
   padding: 25px 27px 0;
   color: white;
@@ -304,17 +305,35 @@ select:focus-visible {
   color: #99a7c8;
   font-size: 11px;
 }
+.hero-cashflow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+.hero-cashflow span {
+  padding: 5px 9px;
+  color: #d2dbf5;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
 .hero-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   position: relative;
   z-index: 2;
   margin-top: 24px;
 }
 .hero-stats div {
-  padding-left: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.15);
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.055);
+  backdrop-filter: blur(6px);
   display: grid;
   gap: 4px;
 }
@@ -324,7 +343,7 @@ select:focus-visible {
 }
 .hero-stats strong {
   color: white;
-  font-size: 13px;
+  font-size: 15px;
 }
 .hero-chart {
   position: absolute;
@@ -667,7 +686,7 @@ select:focus-visible {
 }
 .account-card h2,
 .plan-card h2 {
-  margin: 20px 0 4px;
+  margin: 0;
   font-size: 15px;
 }
 .account-card > p,
@@ -742,6 +761,58 @@ select:focus-visible {
   display: flex;
   gap: 8px;
 }
+.ledger-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.ledger-summary > div {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 11px;
+  padding: 14px 15px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 5px 18px rgba(35, 48, 82, 0.035);
+}
+.ledger-summary-icon {
+  grid-row: 1 / 3;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+}
+.ledger-summary-icon.neutral {
+  color: #52647e;
+  background: #eef2f7;
+}
+.ledger-summary-icon.buy {
+  color: #4b66ca;
+  background: #edf1ff;
+}
+.ledger-summary-icon.sell {
+  color: #13805e;
+  background: #e9f7f2;
+}
+.ledger-summary-icon.fee {
+  color: #ae6b21;
+  background: #fff4df;
+}
+.ledger-summary > div > span:not(.ledger-summary-icon) {
+  color: var(--muted);
+  font-size: 12px;
+}
+.ledger-summary strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .search-box {
   height: 39px;
   width: min(360px, 42vw);
@@ -775,19 +846,27 @@ table {
   min-width: 850px;
 }
 th {
-  padding: 13px 16px;
+  padding: 15px 16px;
   text-align: left;
   font-size: 9px;
   color: #8b93a4;
   font-weight: 600;
   background: #f8f9fb;
   border-bottom: 1px solid var(--line);
+  white-space: nowrap;
 }
 td {
-  padding: 13px 16px;
+  padding: 15px 16px;
   font-size: 10px;
   border-bottom: 1px solid #eff1f5;
   color: #657086;
+  vertical-align: middle;
+}
+tbody tr {
+  transition: background 0.16s ease;
+}
+tbody tr:hover {
+  background: #fafbfe;
 }
 tbody tr:last-child td {
   border-bottom: 0;
@@ -807,7 +886,29 @@ td small {
 }
 .number-cell {
   color: var(--ink);
-  font-weight: 650;
+  font-weight: 750;
+}
+.numeric-heading,
+.numeric-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.fee-cell {
+  color: #9b672c;
+}
+.ledger-product-cell {
+  min-width: 235px;
+}
+.ledger-cell-stack {
+  display: grid;
+  gap: 3px;
+}
+.ledger-cell-stack strong {
+  margin: 0;
+}
+.ledger-row-action {
+  width: 56px;
+  text-align: right;
 }
 .kind-badge,
 .status-badge {
@@ -871,7 +972,13 @@ td small {
   padding: 24px 28px;
   color: white;
   border-radius: 19px;
-  background: linear-gradient(120deg, #536fd5, #7762cc);
+  background:
+    radial-gradient(
+      circle at 82% 10%,
+      rgba(255, 255, 255, 0.2),
+      transparent 28%
+    ),
+    linear-gradient(120deg, #4c69d3, #725cca);
   display: grid;
   grid-template-columns: 1fr 1fr auto;
   align-items: center;
@@ -885,6 +992,9 @@ td small {
 .plan-summary span {
   color: #cfd7fa;
   font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 .plan-summary strong {
   font-size: 25px;
@@ -905,28 +1015,84 @@ td small {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
 }
+.plan-card {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  padding: 22px;
+  border-top: 4px solid var(--blue);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+.plan-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 34px rgba(35, 48, 82, 0.1);
+}
+.plan-card-title {
+  margin-top: 18px;
+}
+.plan-card-title h2 {
+  line-height: 1.45;
+}
+.plan-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.plan-tags span {
+  padding: 4px 8px;
+  color: #526077;
+  font-size: 12px;
+  font-weight: 650;
+  border-radius: 7px;
+  background: #f0f3f8;
+}
+.plan-account {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  color: #68748b;
+  font-size: 13px;
+}
 .status-badge {
   color: var(--green);
   background: #e9f7f2;
 }
 .plan-amount {
+  display: grid;
+  gap: 5px;
   margin: 20px 0;
 }
-.plan-amount strong {
-  font-size: 25px;
-}
-.plan-amount span {
+.plan-amount > span {
+  margin: 0;
   color: var(--muted);
-  font-size: 9px;
-  margin-left: 4px;
+  font-size: 12px;
+}
+.plan-amount > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.plan-amount strong {
+  font-size: 27px;
+  letter-spacing: -0.035em;
+}
+.plan-amount small {
+  color: var(--muted);
+  font-size: 12px;
 }
 .plan-date {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  padding: 13px;
-  background: #f7f8fa;
-  border-radius: 10px;
+  padding: 14px;
+  background: #f5f7fb;
+  border: 1px solid #edf0f5;
+  border-radius: 12px;
 }
 .plan-date div {
   display: grid;
@@ -1087,6 +1253,210 @@ td small {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 8px;
+}
+.market-news-panel {
+  padding: 24px;
+  overflow: hidden;
+}
+.market-news-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+.market-news-heading {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+}
+.market-news-mark {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: white;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #5b7cfa, #765dca);
+  box-shadow: 0 9px 22px rgba(82, 102, 204, 0.22);
+}
+.market-news-title-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.market-news-title-line h2 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.02em;
+}
+.market-news-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.news-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  color: #127656;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: #e8f7f1;
+}
+.news-live-badge i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #16a176;
+  box-shadow: 0 0 0 3px rgba(22, 161, 118, 0.12);
+}
+.news-live-badge.offline {
+  color: #a76b22;
+  background: #fff3df;
+}
+.news-live-badge.offline i {
+  background: #d79034;
+  box-shadow: none;
+}
+.market-news-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.market-news-card {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  padding: 16px 17px;
+  color: inherit;
+  text-decoration: none;
+  border: 1px solid #e8ebf2;
+  border-left: 4px solid #667eea;
+  border-radius: 13px;
+  background: #fbfcfe;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.market-news-card:hover {
+  transform: translateY(-2px);
+  border-color: #cfd7ed;
+  box-shadow: 0 10px 24px rgba(35, 48, 82, 0.08);
+}
+.market-news-card.category-A股 {
+  border-left-color: #e06e77;
+}
+.market-news-card.category-海外市场 {
+  border-left-color: #5b7cfa;
+}
+.market-news-card.category-基金ETF {
+  border-left-color: #16a176;
+}
+.market-news-card.category-宏观 {
+  border-left-color: #d4963c;
+}
+.news-card-meta,
+.news-card-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.news-card-meta span {
+  padding: 3px 7px;
+  color: #596983;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  background: #edf1f7;
+}
+.news-card-meta time {
+  color: #8b94a6;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.market-news-card h3 {
+  margin: 0;
+  color: #242b3c;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.market-news-card > p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: #68748a;
+  font-size: 12.5px;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.news-card-source {
+  padding-top: 3px;
+  color: #8a93a5;
+  font-size: 11.5px;
+}
+.news-card-source span:last-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #526dcc;
+  font-weight: 650;
+}
+.news-disclaimer {
+  margin: 14px 0 0;
+  color: #8a93a5;
+  font-size: 11.5px;
+  text-align: right;
+}
+.news-loading-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.news-loading-grid span {
+  height: 145px;
+  border-radius: 13px;
+  background: linear-gradient(90deg, #f1f3f7 25%, #f8f9fb 50%, #f1f3f7 75%);
+  background-size: 200% 100%;
+  animation: news-shimmer 1.4s infinite;
+}
+@keyframes news-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+.news-empty {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--muted);
+  border: 1px dashed #d3d9e5;
+  border-radius: 13px;
+  background: #fafbfc;
+}
+.news-empty strong {
+  color: var(--ink);
+}
+.news-empty span {
+  font-size: 13px;
+}
+.news-empty button {
+  margin-top: 5px;
+  padding: 7px 12px;
+  color: var(--blue-dark);
+  border: 1px solid #cfd8f5;
+  border-radius: 8px;
+  background: white;
 }
 .risk-grid {
   grid-column: auto;
@@ -1484,6 +1854,21 @@ td small {
 .form-grid .lookup-button:disabled {
   opacity: 0.6;
 }
+.classification-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.classification-line span {
+  width: max-content;
+  padding: 3px 7px;
+  border: 1px solid #dce3fb;
+  border-radius: 999px;
+  color: #465a92;
+  background: #f3f6ff;
+  font-size: 11px;
+  font-weight: 700;
+}
 .wide {
   grid-column: 1 / -1;
 }
@@ -1646,6 +2031,9 @@ td small {
   .metric-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+  .ledger-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .allocation-hero {
     grid-template-columns: 250px 1fr;
     padding: 25px;
@@ -1689,7 +2077,7 @@ td small {
     gap: 12px;
   }
   .hero-balance {
-    min-height: 300px;
+    min-height: 432px;
     padding: 21px 19px 0;
     border-radius: 17px;
   }
@@ -1708,7 +2096,7 @@ td small {
     margin-top: 20px;
   }
   .hero-chart {
-    inset: 226px -15px 0;
+    inset: 360px -15px 0;
   }
   .metric-grid {
     grid-template-columns: repeat(2, 1fr);
@@ -1726,6 +2114,32 @@ td small {
   .panel {
     border-radius: 14px;
     padding: 15px;
+  }
+  .market-news-panel {
+    padding: 16px;
+  }
+  .market-news-head {
+    display: grid;
+  }
+  .market-news-head .secondary-button {
+    width: 100%;
+  }
+  .market-news-mark {
+    width: 42px;
+    height: 42px;
+  }
+  .market-news-title-line h2 {
+    font-size: 18px;
+  }
+  .market-news-grid,
+  .news-loading-grid {
+    grid-template-columns: 1fr;
+  }
+  .market-news-card {
+    padding: 15px;
+  }
+  .news-disclaimer {
+    text-align: left;
   }
   .chart-lg {
     height: 210px;
@@ -1761,6 +2175,84 @@ td small {
   }
   .toolbar > div .secondary-button {
     display: none;
+  }
+  .ledger-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+  .ledger-summary > div {
+    grid-template-columns: 35px minmax(0, 1fr);
+    column-gap: 9px;
+    padding: 12px;
+  }
+  .ledger-summary-icon {
+    width: 35px;
+    height: 35px;
+  }
+  .ledger-summary strong {
+    font-size: 15px;
+  }
+  .table-panel {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .table-scroll {
+    overflow: visible;
+  }
+  .table-panel table,
+  .table-panel tbody {
+    display: block;
+    min-width: 0;
+  }
+  .table-panel thead {
+    display: none;
+  }
+  .table-panel tbody {
+    display: grid;
+    gap: 11px;
+  }
+  .table-panel tbody tr {
+    display: grid;
+    padding: 11px 14px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: white;
+    box-shadow: 0 5px 18px rgba(35, 48, 82, 0.04);
+  }
+  .table-panel td {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    text-align: right;
+    border-bottom: 1px solid #eff1f5;
+  }
+  .table-panel td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    text-align: left;
+  }
+  .table-panel td:last-child {
+    border-bottom: 0;
+  }
+  .table-panel .ledger-cell-stack {
+    justify-items: end;
+  }
+  .table-panel .ledger-product-cell {
+    min-width: 0;
+  }
+  .table-panel .ledger-product-cell small {
+    max-width: 210px;
+  }
+  .table-panel .ledger-row-action {
+    display: flex;
+    justify-content: flex-end;
+    width: auto;
   }
   .plan-summary {
     grid-template-columns: 1fr 1fr;
@@ -1875,44 +2367,48 @@ td small {
 
 /* Readability and interaction baseline for financial data. */
 body {
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 15.5px;
+  line-height: 1.56;
+}
+.sidebar nav button,
+.settings-link {
+  font-size: 15px;
 }
 .topbar h1 {
-  font-size: 22px;
+  font-size: 23px;
 }
 .topbar p,
 .valuation-pill {
-  font-size: 13px;
+  font-size: 14px;
 }
 .primary-button,
 .secondary-button,
 .ghost-button {
-  min-height: 42px;
-  font-size: 13px;
+  min-height: 44px;
+  font-size: 14px;
 }
 .panel-title h2 {
-  font-size: 16px;
+  font-size: 17px;
 }
 .panel-title p,
 .panel-title > span {
-  font-size: 12px;
+  font-size: 13px;
 }
 .eyebrow {
-  font-size: 12px;
+  font-size: 13px;
 }
 .metric-top span,
 .metric-card small {
-  font-size: 12px;
+  font-size: 13px;
 }
 .sidebar-status p,
 .brand small {
-  font-size: 11px;
+  font-size: 12px;
 }
 .account-card h2,
 .plan-card h2,
 .data-card h2 {
-  font-size: 16px;
+  font-size: 17px;
 }
 .account-card > p,
 .plan-card > p,
@@ -1926,7 +2422,7 @@ body {
 .allocation-hero p,
 .big-donut > div:last-child span,
 .audit-list p {
-  font-size: 12px;
+  font-size: 13px;
 }
 .account-card-stats span,
 .target-name span,
@@ -1934,71 +2430,71 @@ body {
 .target-row > label,
 .ranking-list span,
 .risk-numbers span {
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 .account-card-stats b,
 .plan-date strong,
 .target-name strong,
 .ranking-list strong,
 .audit-list strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 .filter-pills button {
   min-height: 36px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .search-box {
   min-height: 42px;
 }
 .search-box input {
-  font-size: 13px;
+  font-size: 14px;
 }
 th {
-  font-size: 12px;
+  font-size: 13px;
 }
 td,
 td strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 td small {
-  font-size: 11px;
+  font-size: 12px;
 }
 .kind-badge,
 .status-badge {
-  font-size: 11px;
+  font-size: 12px;
 }
 .text-danger {
-  min-height: 38px;
-  font-size: 12px;
+  min-height: 40px;
+  font-size: 13px;
 }
 .target-row input {
-  height: 40px;
-  font-size: 13px;
+  height: 42px;
+  font-size: 14px;
 }
 .rank {
-  font-size: 12px;
+  font-size: 13px;
 }
 .form-grid label > span {
-  font-size: 13px;
+  font-size: 14px;
 }
 .form-grid input,
 .form-grid select {
-  min-height: 44px;
-  font-size: 14px;
+  min-height: 47px;
+  font-size: 15px;
 }
 .form-grid small,
 .form-note {
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 .segmented button {
-  min-height: 38px;
-  font-size: 12px;
+  min-height: 42px;
+  font-size: 13px;
 }
 .modal-head h2 {
-  font-size: 20px;
+  font-size: 22px;
 }
 .recharts-text {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .account-detail {
@@ -2016,16 +2512,16 @@ td small {
 }
 .account-detail span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .account-detail strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 .account-detail p {
   grid-column: 1 / -1;
   margin: 2px 0 0;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 .account-detail-actions {
   grid-column: 1 / -1;
@@ -2046,14 +2542,20 @@ td small {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .plan-actions .secondary-button {
-  min-height: 36px;
+  min-height: 40px;
   padding-inline: 11px;
 }
+.plan-actions .plan-edit-button {
+  color: var(--blue-dark);
+  border-color: #cfd8fb;
+  background: #f4f6ff;
+}
 .plan-actions .text-danger {
-  margin: 0;
+  margin: 0 0 0 auto;
 }
 .panel-title-row {
   display: flex;
@@ -2088,11 +2590,11 @@ td small {
   gap: 4px;
 }
 .instrument-list strong {
-  font-size: 14px;
+  font-size: 15px;
 }
 .instrument-list span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 button:disabled {
   cursor: not-allowed;
@@ -2101,7 +2603,7 @@ button:disabled {
 
 @media (max-width: 680px) {
   .topbar h1 {
-    font-size: 18px;
+    font-size: 19px;
   }
   .panel-title-row {
     display: grid;
@@ -2117,7 +2619,7 @@ button:disabled {
     width: 100%;
   }
   .mobile-nav button {
-    font-size: 10.5px;
+    font-size: 12px;
     min-width: 52px;
   }
   .account-card,

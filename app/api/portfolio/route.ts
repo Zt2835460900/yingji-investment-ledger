@@ -11,6 +11,7 @@ import {
   PRICE_SCALE,
   QUANTITY_SCALE,
   tradeGrossUnits,
+  unitsToNumber,
 } from "@/lib/money";
 import type {
   AccountRow,
@@ -28,16 +29,6 @@ export const dynamic = "force-dynamic";
 const instrumentColumns =
   "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
 
-const inferFundType = (code: string, name: string) =>
-  /ETF/i.test(name) || /^(5\d{5}|159\d{3})$/.test(code) ? "ETF" : "FUND";
-
-const inferAssetClass = (name: string) => {
-  if (/纳斯达克|标普|美国|美股/i.test(name)) return "美国股票";
-  if (/港股|恒生/i.test(name)) return "港股";
-  if (/债|固收/i.test(name)) return "债券";
-  return "中国股票";
-};
-
 async function syncFundInstrument(
   d1: D1Database,
   instrumentId: number,
@@ -46,10 +37,12 @@ async function syncFundInstrument(
   const live = await fetchLiveFundData(code);
   await d1
     .prepare(
-      "UPDATE instruments SET name = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+      "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
     )
     .bind(
       live.name,
+      live.assetClass,
+      live.productType,
       live.standardBuyFeeBps,
       live.eastmoneyBuyFeeBps,
       decimalToUnits(live.minPurchase),
@@ -82,8 +75,9 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
     .first<InstrumentRow>();
 
   if (instrument) {
+    let live: Awaited<ReturnType<typeof fetchLiveFundData>> | null = null;
     try {
-      await syncFundInstrument(d1, instrument.id, code);
+      live = await syncFundInstrument(d1, instrument.id, code);
       instrument = await d1
         .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
         .bind(instrument.id)
@@ -91,7 +85,32 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
     } catch {
       // 已收录的产品即使数据源临时不可用，也允许继续录入实际成交。
     }
-    return instrument;
+    if (!instrument) throw new Error("基金资料读取失败");
+    const cachedPrice = live
+      ? null
+      : await d1
+          .prepare(
+            "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? ORDER BY price_date DESC LIMIT 1",
+          )
+          .bind(instrument.id)
+          .first<{ price_date: string; price_units: number; source: string }>();
+    return {
+      instrument,
+      latestNav:
+        live?.latestNav ??
+        (cachedPrice ? unitsToNumber(cachedPrice.price_units, PRICE_SCALE) : 0),
+      latestNavDate: live?.latestNavDate ?? cachedPrice?.price_date ?? "",
+      fundCategory: live?.fundCategory ?? "",
+      confirmationBusinessDays:
+        live?.confirmationBusinessDays ??
+        (instrument.product_type === "ETF"
+          ? 0
+          : /美国|海外/.test(instrument.asset_class)
+            ? 2
+            : 1),
+      quoteSource: live ? live.source : (cachedPrice?.source ?? "CACHED"),
+      isLive: Boolean(live),
+    };
   }
 
   const live = await fetchLiveFundData(code);
@@ -102,8 +121,8 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
     .bind(
       live.name.slice(0, 80),
       code,
-      inferAssetClass(live.name),
-      inferFundType(code, live.name),
+      live.assetClass,
+      live.productType,
       live.standardBuyFeeBps,
       live.eastmoneyBuyFeeBps,
       decimalToUnits(live.minPurchase),
@@ -128,7 +147,15 @@ async function resolveFundInstrument(d1: D1Database, codeInput: string) {
         decimalToUnits(live.latestNav, PRICE_SCALE),
       )
       .run();
-  return instrument;
+  return {
+    instrument,
+    latestNav: live.latestNav,
+    latestNavDate: live.latestNavDate,
+    fundCategory: live.fundCategory,
+    confirmationBusinessDays: live.confirmationBusinessDays,
+    quoteSource: live.source,
+    isLive: true,
+  };
 }
 
 async function loadPortfolio() {
@@ -235,11 +262,8 @@ export async function POST(request: Request) {
     }
 
     if (action === "resolveInstrument") {
-      const instrument = await resolveFundInstrument(
-        d1,
-        String(body.code ?? ""),
-      );
-      return Response.json({ instrument });
+      const resolved = await resolveFundInstrument(d1, String(body.code ?? ""));
+      return Response.json(resolved);
     }
 
     if (action === "createEntry") {
@@ -309,10 +333,12 @@ export async function POST(request: Request) {
             const live = await fetchLiveFundData(instrument.code);
             await d1
               .prepare(
-                "UPDATE instruments SET name = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
+                "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = ?, data_source = ?, source_updated_at = ? WHERE id = ?",
               )
               .bind(
                 live.name,
+                live.assetClass,
+                live.productType,
                 live.standardBuyFeeBps,
                 live.eastmoneyBuyFeeBps,
                 decimalToUnits(live.minPurchase),
@@ -530,18 +556,47 @@ export async function POST(request: Request) {
           )
           .run();
     } else if (action === "createPlan") {
+      const accountId = Number(body.accountId);
+      const instrumentId = Number(body.instrumentId);
+      const amountUnits = decimalToUnits(body.amount);
+      if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
+        throw new Error("请选择投资账户和产品");
+      if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
       await d1
         .prepare(
           "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, day_of_month, next_date) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(
-          Number(body.accountId),
-          Number(body.instrumentId),
-          decimalToUnits(body.amount),
+          accountId,
+          instrumentId,
+          amountUnits,
           Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
           isoDate(body.nextDate),
         )
         .run();
+    } else if (action === "updatePlan") {
+      const planId = Number(body.id);
+      const accountId = Number(body.accountId);
+      const instrumentId = Number(body.instrumentId);
+      const amountUnits = decimalToUnits(body.amount);
+      if (!Number.isInteger(planId)) throw new Error("定投计划不存在");
+      if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
+        throw new Error("请选择投资账户和产品");
+      if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
+      const updated = await d1
+        .prepare(
+          "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, day_of_month = ?, next_date = ? WHERE id = ?",
+        )
+        .bind(
+          accountId,
+          instrumentId,
+          amountUnits,
+          Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
+          isoDate(body.nextDate),
+          planId,
+        )
+        .run();
+      if (!updated.meta.changes) throw new Error("定投计划不存在");
     } else if (action === "togglePlan") {
       const planId = Number(body.id);
       if (!Number.isInteger(planId)) throw new Error("定投计划不存在");
