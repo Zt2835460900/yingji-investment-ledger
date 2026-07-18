@@ -34,6 +34,7 @@ const schemaStatements = [
     instrument_id INTEGER,
     kind TEXT NOT NULL,
     trade_date TEXT NOT NULL,
+    confirmation_date TEXT NOT NULL DEFAULT '',
     quantity_units INTEGER NOT NULL DEFAULT 0,
     price_units INTEGER NOT NULL DEFAULT 0,
     gross_amount_units INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +89,7 @@ const upgradeStatements = [
   `ALTER TABLE instruments ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE ledger_entries ADD COLUMN purchase_channel TEXT NOT NULL DEFAULT 'MANUAL'`,
   `ALTER TABLE ledger_entries ADD COLUMN fee_source TEXT NOT NULL DEFAULT 'MANUAL'`,
+  `ALTER TABLE ledger_entries ADD COLUMN confirmation_date TEXT NOT NULL DEFAULT ''`,
 ];
 
 const seedStatements = [

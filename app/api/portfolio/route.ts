@@ -148,7 +148,7 @@ async function loadPortfolio() {
         .all<InstrumentRow>(),
       d1
         .prepare(
-          "SELECT id, account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
+          "SELECT id, account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
         )
         .all<LedgerRow>(),
       d1
@@ -264,6 +264,13 @@ export async function POST(request: Request) {
       const quantityUnits = decimalToUnits(body.quantity, QUANTITY_SCALE);
       const priceUnits = decimalToUnits(body.price, PRICE_SCALE);
       const tradeDate = isoDate(body.tradeDate);
+      const confirmationDate =
+        ["BUY", "SELL"].includes(kind) &&
+        String(body.confirmationDate ?? "").trim()
+          ? isoDate(body.confirmationDate)
+          : "";
+      if (confirmationDate && confirmationDate < tradeDate)
+        throw new Error("份额确认日期不能早于交易日期");
       if (["BUY", "SELL"].includes(kind) && quantityUnits <= 0)
         throw new Error("成交份额必须大于 0");
       let grossAmountUnits = decimalToUnits(body.amount);
@@ -404,14 +411,15 @@ export async function POST(request: Request) {
       await d1
         .prepare(
           `INSERT INTO ledger_entries
-        (account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           accountId,
           instrumentId,
           kind,
           tradeDate,
+          confirmationDate,
           quantityUnits,
           priceUnits,
           grossAmountUnits,
@@ -659,6 +667,14 @@ export async function POST(request: Request) {
           throw new Error(`第 ${index + 2} 行产品代码不存在`);
         const quantityUnits = decimalToUnits(row.quantity, QUANTITY_SCALE);
         const priceUnits = decimalToUnits(row.price, PRICE_SCALE);
+        const tradeDate = isoDate(row.tradeDate);
+        const confirmationDate =
+          (kind === "BUY" || kind === "SELL") &&
+          String(row.confirmationDate ?? "").trim()
+            ? isoDate(row.confirmationDate)
+            : "";
+        if (confirmationDate && confirmationDate < tradeDate)
+          throw new Error(`第 ${index + 2} 行确认日期不能早于交易日期`);
         let amountUnits = decimalToUnits(row.amount);
         if (!amountUnits && quantityUnits && priceUnits)
           amountUnits = tradeGrossUnits(quantityUnits, priceUnits);
@@ -678,14 +694,15 @@ export async function POST(request: Request) {
         return d1
           .prepare(
             `INSERT INTO ledger_entries
-          (account_id, instrument_id, kind, trade_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             accountId,
             instrumentId,
             kind,
-            isoDate(row.tradeDate),
+            tradeDate,
+            confirmationDate,
             quantityUnits,
             priceUnits,
             amountUnits,

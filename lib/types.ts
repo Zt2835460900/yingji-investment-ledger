@@ -1,4 +1,5 @@
-export type EntryKind = "DEPOSIT" | "WITHDRAWAL" | "BUY" | "SELL" | "DIVIDEND" | "FEE";
+export type EntryKind =
+  "DEPOSIT" | "WITHDRAWAL" | "BUY" | "SELL" | "DIVIDEND" | "FEE";
 
 export interface AccountRow {
   id: number;
@@ -33,6 +34,7 @@ export interface LedgerRow {
   instrument_id: number | null;
   kind: EntryKind;
   trade_date: string;
+  confirmation_date: string;
   quantity_units: number;
   price_units: number;
   gross_amount_units: number;

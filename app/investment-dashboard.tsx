@@ -117,6 +117,7 @@ interface PortfolioData {
     instrument_id: number | null;
     kind: string;
     trade_date: string;
+    confirmation_date: string;
     quantity_units: number;
     price_units: number;
     gross_amount_units: number;
@@ -1039,7 +1040,7 @@ function Ledger({
 }) {
   const exportLedger = () => {
     const header =
-      "日期,类型,账户,产品代码,产品名称,份额,价格,金额,手续费,税费,渠道,备注";
+      "交易日期,确认日期,类型,账户,产品代码,产品名称,份额,价格,金额,手续费,税费,渠道,备注";
     const lines = rows.map((entry) => {
       const instrument = data.instruments.find(
         (item) => item.id === entry.instrument_id,
@@ -1049,6 +1050,7 @@ function Ledger({
       );
       const cells = [
         entry.trade_date,
+        entry.confirmation_date,
         kindLabels[entry.kind] ?? entry.kind,
         account?.name ?? "",
         instrument?.code ?? "",
@@ -1131,7 +1133,12 @@ function Ledger({
                 );
                 return (
                   <tr key={entry.id}>
-                    <td>{entry.trade_date}</td>
+                    <td>
+                      {entry.trade_date}
+                      {entry.confirmation_date && (
+                        <small>确认 {entry.confirmation_date}</small>
+                      )}
+                    </td>
                     <td>
                       <span
                         className={`kind-badge ${entry.kind.toLowerCase()}`}
@@ -1624,7 +1631,7 @@ function DataCenter({
 }) {
   const downloadTemplate = () => {
     const content =
-      "账户名称,交易类型,交易日期,产品代码,成交份额,成交价格,成交金额,手续费,税费,备注,外部流水号\n纳斯达克100ETF,BUY,2026-07-18,513100,100,2.846,284.6,0.1,0,示例交易,REF-001";
+      "账户名称,交易类型,交易日期,确认日期,产品代码,成交份额,成交价格,成交金额,手续费,税费,备注,外部流水号\n纳斯达克100ETF,BUY,2026-07-18,2026-07-21,513100,100,2.846,284.6,0.1,0,示例交易,REF-001";
     const blob = new Blob(["\ufeff" + content], {
       type: "text/csv;charset=utf-8",
     });
@@ -1826,6 +1833,7 @@ function ModalForm({
     instrumentId: String(data.instruments[0]?.id ?? ""),
     instrumentCode: data.instruments[0]?.code ?? "",
     tradeDate: today,
+    confirmationDate: "",
     priceDate: today,
     nextDate: today,
     dayOfMonth: "5",
@@ -2148,6 +2156,26 @@ function ModalForm({
                     onChange={(e) => set("tradeDate", e.target.value)}
                   />
                 </Field>
+                {["BUY", "SELL"].includes(form.kind) &&
+                  (!selectedInstrument ||
+                    ["FUND", "ETF"].includes(
+                      selectedInstrument.product_type,
+                    )) && (
+                    <Field label="份额确认日期">
+                      <input
+                        type="date"
+                        min={form.tradeDate}
+                        value={form.confirmationDate}
+                        onChange={(e) =>
+                          set("confirmationDate", e.target.value)
+                        }
+                      />
+                      <small>
+                        填写基金公司实际确认日期（常见
+                        T+1/T+2）；收益计算仍按交易日期
+                      </small>
+                    </Field>
+                  )}
                 {["BUY", "SELL"].includes(form.kind) && (
                   <>
                     <Field label="成交份额">
@@ -2545,6 +2573,7 @@ async function importFile(
       账户名称: "accountName",
       交易类型: "kind",
       交易日期: "tradeDate",
+      确认日期: "confirmationDate",
       产品代码: "code",
       成交份额: "quantity",
       成交价格: "price",
