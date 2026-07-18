@@ -854,11 +854,17 @@ function Accounts({
 }) {
   const [filter, setFilter] = useState<"ALL" | "PROFIT" | "LOSS">("ALL");
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const profitCount = data.accounts.filter(
+    (account) => account.profit > 0,
+  ).length;
+  const lossCount = data.accounts.filter(
+    (account) => account.profit < 0,
+  ).length;
   const accounts = data.accounts.filter((account) =>
     filter === "ALL"
       ? true
       : filter === "PROFIT"
-        ? account.profit >= 0
+        ? account.profit > 0
         : account.profit < 0,
   );
   return (
@@ -869,19 +875,19 @@ function Accounts({
             className={filter === "ALL" ? "active" : ""}
             onClick={() => setFilter("ALL")}
           >
-            全部账户
+            全部 {data.accounts.length}
           </button>
           <button
             className={filter === "PROFIT" ? "active" : ""}
             onClick={() => setFilter("PROFIT")}
           >
-            盈利
+            盈利 {profitCount}
           </button>
           <button
             className={filter === "LOSS" ? "active" : ""}
             onClick={() => setFilter("LOSS")}
           >
-            亏损
+            亏损 {lossCount}
           </button>
         </div>
         <button className="secondary-button" onClick={onAccount}>
@@ -890,6 +896,15 @@ function Accounts({
         </button>
       </div>
       <div className="account-card-grid">
+        {!accounts.length && (
+          <div className="account-filter-empty">
+            <Check size={22} />
+            <strong>
+              {filter === "LOSS" ? "当前没有亏损账户" : "暂无盈利账户"}
+            </strong>
+            <span>盈亏分类会根据账户总收益自动更新</span>
+          </div>
+        )}
         {accounts.map((account) => {
           const positions = data.holdings.filter(
             (item) => item.accountId === account.id,
@@ -900,17 +915,38 @@ function Accounts({
                 <span style={{ background: account.color }}>
                   <Landmark size={19} />
                 </span>
-                <button
-                  aria-label={
-                    expandedId === account.id ? "收起账户详情" : "展开账户详情"
-                  }
-                  title={expandedId === account.id ? "收起详情" : "查看详情"}
-                  onClick={() =>
-                    setExpandedId(expandedId === account.id ? null : account.id)
-                  }
-                >
-                  <MoreHorizontal size={18} />
-                </button>
+                <div className="account-card-actions">
+                  <span
+                    className={`account-profit-status ${
+                      account.profit > 0
+                        ? "profit"
+                        : account.profit < 0
+                          ? "loss"
+                          : "flat"
+                    }`}
+                  >
+                    {account.profit > 0
+                      ? "盈利"
+                      : account.profit < 0
+                        ? "亏损"
+                        : "持平"}
+                  </span>
+                  <button
+                    aria-label={
+                      expandedId === account.id
+                        ? "收起账户详情"
+                        : "展开账户详情"
+                    }
+                    title={expandedId === account.id ? "收起详情" : "查看详情"}
+                    onClick={() =>
+                      setExpandedId(
+                        expandedId === account.id ? null : account.id,
+                      )
+                    }
+                  >
+                    <MoreHorizontal size={18} />
+                  </button>
+                </div>
               </div>
               <h2>{account.name}</h2>
               <p>基准币种 {account.currency} · 移动加权成本</p>
@@ -918,8 +954,16 @@ function Accounts({
               <div className="account-card-stats">
                 <div>
                   <span>累计收益</span>
-                  <b className={account.profit >= 0 ? "up" : "down"}>
-                    {account.profit >= 0 ? "+" : ""}¥{money(account.profit)}
+                  <b
+                    className={
+                      account.profit > 0
+                        ? "up"
+                        : account.profit < 0
+                          ? "down"
+                          : ""
+                    }
+                  >
+                    {account.profit > 0 ? "+" : ""}¥{money(account.profit)}
                   </b>
                 </div>
                 <div>

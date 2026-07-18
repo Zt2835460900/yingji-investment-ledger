@@ -622,6 +622,49 @@ select:focus-visible {
   color: #9aa2b3;
   background: transparent;
 }
+.account-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.account-profit-status {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+}
+.account-profit-status.profit {
+  color: #157657;
+  background: #e9f8f2;
+}
+.account-profit-status.loss {
+  color: #b63e49;
+  background: #fff0f1;
+}
+.account-profit-status.flat {
+  color: #6f7788;
+  background: #eef0f4;
+}
+.account-filter-empty {
+  min-height: 190px;
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 28px;
+  color: var(--muted);
+  border: 1px dashed #ccd2df;
+  border-radius: 17px;
+  background: #fafbfe;
+}
+.account-filter-empty strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.account-filter-empty span {
+  font-size: 12px;
+}
 .account-card h2,
 .plan-card h2 {
   margin: 20px 0 4px;
