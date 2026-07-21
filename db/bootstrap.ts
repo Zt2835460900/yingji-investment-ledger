@@ -73,6 +73,40 @@ const schemaStatements = [
     target_bps INTEGER NOT NULL,
     alert_bps INTEGER NOT NULL DEFAULT 500
   )`,
+  `CREATE TABLE IF NOT EXISTS investment_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    instrument_id INTEGER,
+    entry_date TEXT NOT NULL,
+    title TEXT NOT NULL,
+    decision TEXT NOT NULL DEFAULT 'REVIEW',
+    mood TEXT NOT NULL DEFAULT 'CALM',
+    thesis TEXT NOT NULL DEFAULT '',
+    review_date TEXT NOT NULL DEFAULT '',
+    review_note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE INDEX IF NOT EXISTS investment_journal_date_idx ON investment_journal(entry_date)`,
+  `CREATE INDEX IF NOT EXISTS investment_journal_instrument_idx ON investment_journal(instrument_id)`,
+  `CREATE TABLE IF NOT EXISTS paper_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    initial_cash_units INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS paper_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    instrument_id INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    quantity_units INTEGER NOT NULL,
+    price_units INTEGER NOT NULL,
+    fee_units INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE INDEX IF NOT EXISTS paper_trades_account_date_idx ON paper_trades(account_id, trade_date)`,
   `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 ];
 
@@ -156,7 +190,19 @@ export async function ensureDatabase() {
     .prepare("SELECT value FROM app_meta WHERE key = ?")
     .bind("seed_version")
     .first();
-  if (!seeded)
-    await d1.batch(seedStatements.map((statement) => d1.prepare(statement)));
+  if (!seeded) {
+    const demoEnabled = await d1
+      .prepare("SELECT value FROM app_meta WHERE key = ?")
+      .bind("demo_seed_enabled")
+      .first<{ value: string }>();
+    if (demoEnabled?.value === "1")
+      await d1.batch(seedStatements.map((statement) => d1.prepare(statement)));
+    else
+      await d1
+        .prepare(
+          "INSERT INTO app_meta (key, value) VALUES ('seed_version', 'production-empty')",
+        )
+        .run();
+  }
   initialized = true;
 }

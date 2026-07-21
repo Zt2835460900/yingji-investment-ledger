@@ -1,10 +1,34 @@
 import { calculatePortfolio } from "@/lib/calculations";
 import {
+  accountNameForEntry,
+  accountRenameUpdatesFromLatestBuys,
+} from "@/lib/account-renaming";
+import { positiveIntegerId } from "@/lib/account-instrument-deletion";
+import {
+  CASH_INSTRUMENT_ID,
+  DEFAULT_ALLOCATION_ALERT_BPS,
+  parseAllocationTarget,
+  parseAllocationTargets,
+  TOTAL_ALLOCATION_BPS,
+  type ParsedAllocationTarget,
+} from "@/lib/allocation-targets";
+import {
   calculateFifoRedemptionFeeUnits,
   calculateTradingFeeUnits,
   feeRuleFromInput,
 } from "@/lib/fees";
 import { fetchLatestFundNav, fetchLiveFundData } from "@/lib/fund-data";
+import {
+  describeUnsupportedStockCode,
+  fetchLiveAshareQuote,
+  fetchLiveUSStockQuote,
+  normalizeProductCodeInput,
+  parseAshareCode,
+  parsePreferredProductType,
+  productCodeLookupCandidates,
+  productTypeMatchesPreference,
+  type PreferredProductType,
+} from "@/lib/stock-data";
 import {
   decimalToUnits,
   isoDate,
@@ -16,6 +40,7 @@ import {
 import type {
   AccountRow,
   InstrumentRow,
+  JournalRow,
   LedgerRow,
   PlanRow,
   PriceRow,
@@ -27,7 +52,7 @@ import { getD1 } from "@/db";
 export const dynamic = "force-dynamic";
 
 const instrumentColumns =
-  "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
+  "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at, management_fee_bps, custodian_fee_bps";
 
 const NAV_SYNC_COOLDOWN_MS = 2 * 60 * 1000;
 
@@ -79,15 +104,17 @@ async function syncFundInstrument(
   quoteDate = "",
 ) {
   const live = await fetchLiveFundData(code, quoteDate);
-  await d1
+  const updated = await d1
     .prepare(
-      "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ?",
+      "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, management_fee_bps = ?, custodian_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ? AND product_type IN ('FUND', 'ETF')",
     )
     .bind(
       live.name,
       live.assetClass,
       live.productType,
       live.standardBuyFeeBps,
+      live.managementFeeBps,
+      live.custodianFeeBps,
       live.eastmoneyBuyFeeBps,
       decimalToUnits(live.minPurchase),
       live.redemptionFeeAvailable ? 1 : 0,
@@ -97,6 +124,8 @@ async function syncFundInstrument(
       instrumentId,
     )
     .run();
+  if (!Number(updated.meta.changes ?? 0))
+    throw new Error("目标产品不是基金或 ETF，已拒绝同步基金资料");
   if (live.latestNav && live.latestNavDate)
     await upsertSyncedPrice(
       d1,
@@ -131,7 +160,9 @@ async function resolveFundInstrument(
   if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
     throw new Error("交易日期格式不正确");
   let instrument = await d1
-    .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+    .prepare(
+      `SELECT ${instrumentColumns} FROM instruments WHERE code = ? AND product_type IN ('FUND', 'ETF')`,
+    )
     .bind(code)
     .first<InstrumentRow>();
 
@@ -146,7 +177,11 @@ async function resolveFundInstrument(
     } catch {
       // 已收录的产品即使数据源临时不可用，也允许继续录入实际成交。
     }
-    if (!instrument) throw new Error("基金资料读取失败");
+    if (
+      !instrument ||
+      !productTypeMatchesPreference(instrument.product_type, "FUND")
+    )
+      throw new Error("基金资料读取失败");
     const cachedPrice = live
       ? null
       : await d1
@@ -182,10 +217,21 @@ async function resolveFundInstrument(
     };
   }
 
+  const occupiedCode = await d1
+    .prepare("SELECT id, name, product_type FROM instruments WHERE code = ?")
+    .bind(code)
+    .first<{ id: number; name: string; product_type: string }>();
+  if (occupiedCode)
+    throw new Error(
+      occupiedCode.product_type === "STOCK"
+        ? `代码 ${code} 已被历史股票“${occupiedCode.name}”占用，请先将股票保存为带 SH/SZ 前缀的规范代码`
+        : `代码 ${code} 已被其他类型产品“${occupiedCode.name}”占用`,
+    );
+
   const live = await fetchLiveFundData(code, quoteDate);
   await d1
     .prepare(
-      "INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at) VALUES (?, ?, 'CN', ?, 'CNY', ?, ?, 10000, 0, 0, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at, management_fee_bps, custodian_fee_bps) VALUES (?, ?, 'CN', ?, 'CNY', ?, ?, 10000, 0, 0, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       live.name.slice(0, 80),
@@ -198,10 +244,14 @@ async function resolveFundInstrument(
       JSON.stringify(live.redemptionTiers),
       live.source,
       live.updatedAt,
+      live.managementFeeBps,
+      live.custodianFeeBps,
     )
     .run();
   instrument = await d1
-    .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+    .prepare(
+      `SELECT ${instrumentColumns} FROM instruments WHERE code = ? AND product_type IN ('FUND', 'ETF')`,
+    )
     .bind(code)
     .first<InstrumentRow>();
   if (!instrument) throw new Error("基金资料保存失败");
@@ -238,6 +288,551 @@ async function resolveFundInstrument(
     quoteSource: live.source,
     isLive: true,
   };
+}
+
+async function readInstrumentPrice(
+  d1: D1Database,
+  instrumentId: number,
+  quoteDate = "",
+) {
+  const selected = await d1
+    .prepare(
+      quoteDate
+        ? "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? AND price_date <= ? ORDER BY price_date DESC LIMIT 1"
+        : "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? ORDER BY price_date DESC LIMIT 1",
+    )
+    .bind(...(quoteDate ? [instrumentId, quoteDate] : [instrumentId]))
+    .first<{ price_date: string; price_units: number; source: string }>();
+  const latest = quoteDate
+    ? await d1
+        .prepare(
+          "SELECT price_date, price_units, source FROM prices WHERE instrument_id = ? ORDER BY price_date DESC LIMIT 1",
+        )
+        .bind(instrumentId)
+        .first<{ price_date: string; price_units: number; source: string }>()
+    : selected;
+  return { selected, latest };
+}
+
+async function storedInstrumentResponse(
+  d1: D1Database,
+  instrument: InstrumentRow,
+  quoteDate = "",
+  isLive = false,
+) {
+  const prices = await readInstrumentPrice(d1, instrument.id, quoteDate);
+  const quoteNav = prices.selected
+    ? unitsToNumber(prices.selected.price_units, PRICE_SCALE)
+    : 0;
+  const latestNav = prices.latest
+    ? unitsToNumber(prices.latest.price_units, PRICE_SCALE)
+    : 0;
+  return {
+    instrument,
+    quoteNav,
+    quoteNavDate: prices.selected?.price_date ?? "",
+    quoteDateRequested: quoteDate,
+    quoteIsExact: Boolean(
+      quoteDate && prices.selected?.price_date === quoteDate,
+    ),
+    latestNav,
+    latestNavDate: prices.latest?.price_date ?? "",
+    price: quoteNav,
+    priceDate: prices.selected?.price_date ?? "",
+    fundCategory: "",
+    confirmationBusinessDays: 0,
+    quoteSource: prices.selected?.source ?? instrument.data_source ?? "CACHED",
+    isLive,
+    matchedProductType: instrument.product_type,
+    feeNotice:
+      instrument.product_type === "STOCK"
+        ? "股票交易佣金因券商和渠道而异，请按实际成交单填写手续费"
+        : "",
+    persisted: true,
+  };
+}
+
+function fundInstrumentFromLive(
+  code: string,
+  live: Awaited<ReturnType<typeof fetchLiveFundData>>,
+  stored: InstrumentRow | null,
+): InstrumentRow {
+  return {
+    id: stored?.id ?? 0,
+    name: live.name.slice(0, 80),
+    code,
+    market: stored?.market ?? "CN",
+    asset_class: live.assetClass,
+    currency: stored?.currency ?? "CNY",
+    product_type: live.productType,
+    buy_fee_bps: live.standardBuyFeeBps,
+    management_fee_bps: live.managementFeeBps,
+    custodian_fee_bps: live.custodianFeeBps,
+    buy_discount_bps: stored?.buy_discount_bps ?? 10_000,
+    sell_fee_bps: stored?.sell_fee_bps ?? 0,
+    min_fee_units: stored?.min_fee_units ?? 0,
+    eastmoney_fee_bps: live.eastmoneyBuyFeeBps,
+    min_purchase_units: decimalToUnits(live.minPurchase),
+    redemption_fee_json: live.redemptionFeeAvailable
+      ? JSON.stringify(live.redemptionTiers)
+      : (stored?.redemption_fee_json ?? "[]"),
+    data_source: live.source,
+    source_updated_at: live.updatedAt,
+  };
+}
+
+async function lookupFundInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDateInput = "",
+) {
+  const code = normalizeProductCodeInput(codeInput);
+  const quoteDate = quoteDateInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("请输入 6 位基金或 ETF 代码");
+  if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
+    throw new Error("交易日期格式不正确");
+
+  const stored = await d1
+    .prepare(
+      `SELECT ${instrumentColumns} FROM instruments WHERE code = ? AND product_type IN ('FUND', 'ETF')`,
+    )
+    .bind(code)
+    .first<InstrumentRow>();
+  if (!stored) {
+    const occupiedCode = await d1
+      .prepare("SELECT name, product_type FROM instruments WHERE code = ?")
+      .bind(code)
+      .first<{ name: string; product_type: string }>();
+    if (occupiedCode)
+      throw new Error(
+        occupiedCode.product_type === "STOCK"
+          ? `代码 ${code} 已被历史股票“${occupiedCode.name}”占用，请先将股票保存为带 SH/SZ 前缀的规范代码`
+          : `代码 ${code} 已被其他类型产品“${occupiedCode.name}”占用`,
+      );
+  }
+
+  let live: Awaited<ReturnType<typeof fetchLiveFundData>>;
+  try {
+    live = await fetchLiveFundData(code, quoteDate);
+  } catch (error) {
+    if (stored)
+      return {
+        ...(await storedInstrumentResponse(d1, stored, quoteDate, false)),
+        persisted: true,
+      };
+    throw error;
+  }
+  return {
+    instrument: fundInstrumentFromLive(code, live, stored ?? null),
+    quoteNav: live.quoteNav,
+    quoteNavDate: live.quoteNavDate,
+    quoteDateRequested: quoteDate,
+    quoteIsExact: live.quoteIsExact,
+    latestNav: live.latestNav,
+    latestNavDate: live.latestNavDate,
+    price: live.quoteNav,
+    priceDate: live.quoteNavDate,
+    fundCategory: live.fundCategory,
+    confirmationBusinessDays: live.confirmationBusinessDays,
+    quoteSource: live.source,
+    isLive: true,
+    matchedProductType: live.productType,
+    feeNotice: "",
+    persisted: Boolean(stored),
+  };
+}
+
+function stockInstrumentFromQuote(
+  quote: Awaited<ReturnType<typeof fetchLiveAshareQuote>>,
+  stored: InstrumentRow | null,
+): InstrumentRow {
+  return {
+    id: stored?.id ?? 0,
+    name: quote.name,
+    code: quote.canonicalCode,
+    market: quote.market,
+    asset_class: "中国股票",
+    currency: "CNY",
+    product_type: "STOCK",
+    buy_fee_bps: stored?.buy_fee_bps ?? 0,
+    management_fee_bps: stored?.management_fee_bps ?? 0,
+    custodian_fee_bps: stored?.custodian_fee_bps ?? 0,
+    buy_discount_bps: stored?.buy_discount_bps ?? 10_000,
+    sell_fee_bps: stored?.sell_fee_bps ?? 0,
+    min_fee_units: stored?.min_fee_units ?? 0,
+    eastmoney_fee_bps: 0,
+    min_purchase_units: 0,
+    redemption_fee_json: "[]",
+    data_source: quote.source,
+    source_updated_at: quote.fetchedAt,
+  };
+}
+
+async function lookupStockInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDateInput = "",
+) {
+  const stock = parseAshareCode(codeInput);
+  if (!stock) throw new Error(describeUnsupportedStockCode(codeInput));
+  const quoteDate = quoteDateInput.trim();
+  if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
+    throw new Error("交易日期格式不正确");
+
+  const [canonicalOwner, legacyOwner] = await Promise.all([
+    d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+      .bind(stock.canonicalCode)
+      .first<InstrumentRow>(),
+    d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+      .bind(stock.code)
+      .first<InstrumentRow>(),
+  ]);
+  if (canonicalOwner && canonicalOwner.product_type !== "STOCK")
+    throw new Error(`规范股票代码 ${stock.canonicalCode} 已被其他类型产品占用`);
+  const canonicalStock =
+    canonicalOwner?.product_type === "STOCK" ? canonicalOwner : null;
+  const legacyStock =
+    legacyOwner?.product_type === "STOCK" ? legacyOwner : null;
+  if (canonicalStock && legacyStock && canonicalStock.id !== legacyStock.id)
+    throw new Error(
+      `检测到重复股票记录 ${stock.code} 与 ${stock.canonicalCode}，请先合并历史数据`,
+    );
+  const stored = canonicalStock ?? legacyStock;
+
+  let quote: Awaited<ReturnType<typeof fetchLiveAshareQuote>>;
+  try {
+    quote = await fetchLiveAshareQuote(stock.canonicalCode);
+  } catch (error) {
+    if (stored)
+      return {
+        ...(await storedInstrumentResponse(d1, stored, quoteDate, false)),
+        persisted: true,
+      };
+    throw error;
+  }
+
+  const cached = stored
+    ? await storedInstrumentResponse(d1, stored, quoteDate, false)
+    : null;
+  const liveFitsRequestedDate = !quoteDate || quote.priceDate <= quoteDate;
+  const quotePrice = liveFitsRequestedDate
+    ? quote.price
+    : (cached?.quoteNav ?? 0);
+  const quotePriceDate = liveFitsRequestedDate
+    ? quote.priceDate
+    : (cached?.quoteNavDate ?? "");
+  return {
+    instrument: stockInstrumentFromQuote(quote, stored ?? null),
+    quoteNav: quotePrice,
+    quoteNavDate: quotePriceDate,
+    quoteDateRequested: quoteDate,
+    quoteIsExact: Boolean(quoteDate && quotePriceDate === quoteDate),
+    latestNav: quote.price,
+    latestNavDate: quote.priceDate,
+    price: quotePrice,
+    priceDate: quotePriceDate,
+    fundCategory: "",
+    confirmationBusinessDays: 0,
+    quoteSource: liveFitsRequestedDate
+      ? quote.source
+      : (cached?.quoteSource ?? quote.source),
+    isLive: true,
+    matchedProductType: "STOCK",
+    feeNotice: "股票交易佣金因券商和渠道而异，请按实际成交单填写手续费",
+    persisted: Boolean(stored),
+  };
+}
+
+async function resolveStockInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDateInput = "",
+) {
+  const stock = parseAshareCode(codeInput);
+  if (!stock) throw new Error(describeUnsupportedStockCode(codeInput));
+  const quoteDate = quoteDateInput.trim();
+  if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
+    throw new Error("交易日期格式不正确");
+
+  const [canonicalOwner, legacyOwner] = await Promise.all([
+    d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+      .bind(stock.canonicalCode)
+      .first<InstrumentRow>(),
+    d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+      .bind(stock.code)
+      .first<InstrumentRow>(),
+  ]);
+  if (canonicalOwner && canonicalOwner.product_type !== "STOCK")
+    throw new Error(`规范股票代码 ${stock.canonicalCode} 已被其他类型产品占用`);
+  const canonicalStock =
+    canonicalOwner?.product_type === "STOCK" ? canonicalOwner : null;
+  const legacyStock =
+    legacyOwner?.product_type === "STOCK" ? legacyOwner : null;
+  if (canonicalStock && legacyStock && canonicalStock.id !== legacyStock.id)
+    throw new Error(
+      `检测到重复股票记录 ${stock.code} 与 ${stock.canonicalCode}，请先合并历史数据`,
+    );
+
+  let instrument = canonicalStock;
+  if (!instrument && legacyStock) {
+    const migrated = await d1
+      .prepare(
+        "UPDATE instruments SET code = ?, market = ? WHERE id = ? AND code = ? AND product_type = 'STOCK'",
+      )
+      .bind(stock.canonicalCode, stock.market, legacyStock.id, stock.code)
+      .run();
+    if (!Number(migrated.meta.changes ?? 0))
+      throw new Error("历史股票代码规范化失败，请重试");
+    instrument = await d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
+      .bind(legacyStock.id)
+      .first<InstrumentRow>();
+    if (!instrument || instrument.product_type !== "STOCK")
+      throw new Error("历史股票资料读取失败");
+  }
+
+  let quote: Awaited<ReturnType<typeof fetchLiveAshareQuote>> | null = null;
+  try {
+    quote = await fetchLiveAshareQuote(stock.canonicalCode);
+  } catch (error) {
+    if (!instrument) throw error;
+  }
+
+  if (!instrument && quote) {
+    await d1
+      .prepare(
+        "INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at, management_fee_bps, custodian_fee_bps) VALUES (?, ?, ?, '中国股票', 'CNY', 'STOCK', 0, 10000, 0, 0, 0, 0, '[]', ?, ?, 0, 0)",
+      )
+      .bind(
+        quote.name,
+        stock.canonicalCode,
+        stock.market,
+        quote.source,
+        quote.fetchedAt,
+      )
+      .run();
+    instrument = await d1
+      .prepare(
+        `SELECT ${instrumentColumns} FROM instruments WHERE code = ? AND product_type = 'STOCK'`,
+      )
+      .bind(stock.canonicalCode)
+      .first<InstrumentRow>();
+  }
+  if (!instrument) throw new Error("股票资料保存失败");
+
+  if (quote) {
+    const updated = await d1
+      .prepare(
+        "UPDATE instruments SET name = ?, market = ?, asset_class = '中国股票', currency = 'CNY', data_source = ?, source_updated_at = ? WHERE id = ? AND product_type = 'STOCK'",
+      )
+      .bind(
+        quote.name,
+        quote.market,
+        quote.source,
+        quote.fetchedAt,
+        instrument.id,
+      )
+      .run();
+    if (!Number(updated.meta.changes ?? 0))
+      throw new Error("目标产品不是股票，已拒绝同步股票资料");
+    await upsertSyncedPrice(
+      d1,
+      instrument.id,
+      quote.priceDate,
+      quote.price,
+      quote.source,
+    );
+    instrument = await d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
+      .bind(instrument.id)
+      .first<InstrumentRow>();
+  }
+  if (!instrument) throw new Error("股票资料读取失败");
+  return storedInstrumentResponse(d1, instrument, quoteDate, Boolean(quote));
+}
+
+async function resolveStoredInstrument(
+  d1: D1Database,
+  instrument: InstrumentRow,
+  quoteDate = "",
+) {
+  if (
+    ["FUND", "ETF"].includes(instrument.product_type) &&
+    /^\d{6}$/.test(instrument.code)
+  )
+    return resolveFundInstrument(d1, instrument.code, quoteDate);
+  if (instrument.product_type === "STOCK") {
+    const stock = parseAshareCode(instrument.code);
+    if (stock) return resolveStockInstrument(d1, instrument.code, quoteDate);
+    // US stocks: fetch live price from Yahoo Finance and upsert
+    let usQuoteLive = false;
+    try {
+      const quote = await fetchLiveUSStockQuote(instrument.code);
+      await upsertSyncedPrice(d1, instrument.id, quote.priceDate, quote.price, quote.source);
+      await d1
+        .prepare("UPDATE instruments SET source_updated_at = ? WHERE id = ?")
+        .bind(quote.fetchedAt, instrument.id)
+        .run();
+      usQuoteLive = true;
+    } catch {
+      // fall through to cached price
+    }
+    return storedInstrumentResponse(d1, instrument, quoteDate, usQuoteLive);
+  }
+  return storedInstrumentResponse(d1, instrument, quoteDate, false);
+}
+
+async function findStoredInvestmentInstrument(
+  d1: D1Database,
+  code: string,
+  preferredProductType: PreferredProductType,
+) {
+  const lookupCodes = productCodeLookupCandidates(code, preferredProductType);
+  for (const lookupCode of lookupCodes) {
+    const existing = await d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ?`)
+      .bind(lookupCode)
+      .first<InstrumentRow>();
+    if (
+      existing &&
+      productTypeMatchesPreference(existing.product_type, preferredProductType)
+    )
+      return existing;
+  }
+  return null;
+}
+
+async function resolveInvestmentInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDate = "",
+  preferredProductType: PreferredProductType = "AUTO",
+) {
+  const code = normalizeProductCodeInput(codeInput);
+  const stock = parseAshareCode(code);
+  const existing = await findStoredInvestmentInstrument(
+    d1,
+    code,
+    preferredProductType,
+  );
+  if (existing) return resolveStoredInstrument(d1, existing, quoteDate);
+
+  if (preferredProductType === "FUND")
+    return resolveFundInstrument(d1, code, quoteDate);
+  if (preferredProductType === "STOCK")
+    return resolveStockInstrument(d1, code, quoteDate);
+
+  if (/^\d{6}$/.test(code)) {
+    // AUTO deliberately checks the fund catalogue first. Six-digit fund and
+    // stock codes can overlap; selecting STOCK explicitly always disambiguates.
+    try {
+      return await resolveFundInstrument(d1, code, quoteDate);
+    } catch (fundError) {
+      if (stock) return resolveStockInstrument(d1, code, quoteDate);
+      throw fundError;
+    }
+  }
+  if (stock) return resolveStockInstrument(d1, code, quoteDate);
+  throw new Error(describeUnsupportedStockCode(code));
+}
+
+async function lookupStoredInstrument(
+  d1: D1Database,
+  instrument: InstrumentRow,
+  quoteDate = "",
+) {
+  if (
+    productTypeMatchesPreference(instrument.product_type, "FUND") &&
+    /^\d{6}$/.test(instrument.code)
+  )
+    return lookupFundInstrument(d1, instrument.code, quoteDate);
+  if (instrument.product_type === "STOCK") {
+    const stock = parseAshareCode(instrument.code);
+    if (stock) return lookupStockInstrument(d1, instrument.code, quoteDate);
+    let usQuoteLive = false;
+    try {
+      const quote = await fetchLiveUSStockQuote(instrument.code);
+      await upsertSyncedPrice(d1, instrument.id, quote.priceDate, quote.price, quote.source);
+      await d1.prepare("UPDATE instruments SET source_updated_at = ? WHERE id = ?")
+        .bind(quote.fetchedAt, instrument.id).run();
+      usQuoteLive = true;
+    } catch {}
+    return storedInstrumentResponse(d1, instrument, quoteDate, usQuoteLive);
+  }
+  return storedInstrumentResponse(d1, instrument, quoteDate, false);
+}
+
+async function lookupInvestmentInstrument(
+  d1: D1Database,
+  codeInput: string,
+  quoteDate = "",
+  preferredProductType: PreferredProductType = "AUTO",
+) {
+  const code = normalizeProductCodeInput(codeInput);
+  const stock = parseAshareCode(code);
+  const existing = await findStoredInvestmentInstrument(
+    d1,
+    code,
+    preferredProductType,
+  );
+  if (existing) return lookupStoredInstrument(d1, existing, quoteDate);
+
+  if (preferredProductType === "FUND")
+    return lookupFundInstrument(d1, code, quoteDate);
+  if (preferredProductType === "STOCK")
+    return lookupStockInstrument(d1, code, quoteDate);
+
+  if (/^\d{6}$/.test(code)) {
+    try {
+      return await lookupFundInstrument(d1, code, quoteDate);
+    } catch (fundError) {
+      if (stock) return lookupStockInstrument(d1, code, quoteDate);
+      throw fundError;
+    }
+  }
+  if (stock) return lookupStockInstrument(d1, code, quoteDate);
+  // US stock lookup
+  if (/^[A-Z][A-Z0-9.-]{0,9}$/.test(code)) {
+    return lookupUSStockInstrument(d1, code, quoteDate);
+  }
+  throw new Error(describeUnsupportedStockCode(code));
+}
+
+async function lookupUSStockInstrument(
+  d1: D1Database,
+  ticker: string,
+  quoteDate = "",
+) {
+  const quote = await fetchLiveUSStockQuote(ticker);
+  const existing = await d1
+    .prepare("SELECT id FROM instruments WHERE code = ? AND product_type = 'STOCK'")
+    .bind(ticker)
+    .first<{ id: number }>();
+  if (existing) {
+    await upsertSyncedPrice(d1, existing.id, quote.priceDate, quote.price, quote.source);
+    await d1.prepare("UPDATE instruments SET source_updated_at = ? WHERE id = ?")
+      .bind(quote.fetchedAt, existing.id).run();
+    const instrument = await d1
+      .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE id = ?`)
+      .bind(existing.id)
+      .first<InstrumentRow>();
+    if (instrument) return storedInstrumentResponse(d1, instrument, quoteDate, true);
+  }
+  await d1
+    .prepare("INSERT OR IGNORE INTO instruments (name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at, management_fee_bps, custodian_fee_bps) VALUES (?, ?, 'US', '美国股票', 'USD', 'STOCK', 0, 10000, 0, 0, 0, 0, '[]', ?, ?, 0, 0)")
+    .bind(quote.name, ticker, quote.source, quote.fetchedAt)
+    .run();
+  const instrument = await d1
+    .prepare(`SELECT ${instrumentColumns} FROM instruments WHERE code = ? AND product_type = 'STOCK'`)
+    .bind(ticker)
+    .first<InstrumentRow>();
+  if (!instrument) throw new Error("美股资料保存失败");
+  await upsertSyncedPrice(d1, instrument.id, quote.priceDate, quote.price, quote.source);
+  return storedInstrumentResponse(d1, instrument, quoteDate, true);
 }
 
 type NavSyncStatus = "idle" | "running" | "success" | "partial" | "error";
@@ -295,42 +890,68 @@ async function writeAppMeta(
 async function loadPortfolio() {
   await ensureDatabase();
   const d1 = getD1();
-  const [accounts, instruments, ledger, prices, plans, targets, navSyncRows] =
-    await Promise.all([
-      d1
-        .prepare(
-          "SELECT id, name, currency, color, cost_method FROM accounts ORDER BY id",
-        )
-        .all<AccountRow>(),
-      d1
-        .prepare(
-          "SELECT id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at FROM instruments ORDER BY id",
-        )
-        .all<InstrumentRow>(),
-      d1
-        .prepare(
-          "SELECT id, account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
-        )
-        .all<LedgerRow>(),
-      d1
-        .prepare(
-          "SELECT id, instrument_id, price_date, price_units, source FROM prices ORDER BY price_date, id",
-        )
-        .all<PriceRow>(),
-      d1
-        .prepare(
-          "SELECT id, account_id, instrument_id, amount_units, frequency, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
-        )
-        .all<PlanRow>(),
-      d1
-        .prepare(
-          "SELECT id, instrument_id, target_bps, alert_bps FROM allocation_targets ORDER BY id",
-        )
-        .all<TargetRow>(),
-      d1
-        .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
-        .all<{ key: string; value: string }>(),
-    ]);
+  const [
+    accounts,
+    instruments,
+    ledger,
+    prices,
+    plans,
+    targets,
+    journal,
+    exchangeRates,
+    navSyncRows,
+  ] = await Promise.all([
+    d1
+      .prepare(
+        "SELECT id, name, currency, color, cost_method FROM accounts ORDER BY id",
+      )
+      .all<AccountRow>(),
+    d1
+      .prepare(
+        `SELECT ${instrumentColumns} FROM instruments ORDER BY id`,
+      )
+      .all<InstrumentRow>(),
+    d1
+      .prepare(
+        "SELECT id, account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
+      )
+      .all<LedgerRow>(),
+    d1
+      .prepare(
+        "SELECT id, instrument_id, price_date, price_units, source FROM prices ORDER BY price_date, id",
+      )
+      .all<PriceRow>(),
+    d1
+      .prepare(
+        "SELECT id, account_id, instrument_id, amount_units, frequency, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
+      )
+      .all<PlanRow>(),
+    d1
+      .prepare(
+        "SELECT id, instrument_id, target_bps, alert_bps FROM allocation_targets ORDER BY id",
+      )
+      .all<TargetRow>(),
+    d1
+      .prepare(
+        `SELECT j.id, j.account_id, j.instrument_id, j.entry_date, j.title,
+                  j.decision, j.mood, j.thesis, j.review_date, j.review_note,
+                  j.created_at, j.updated_at, a.name AS account_name,
+                  i.name AS instrument_name, i.code AS instrument_code
+           FROM investment_journal j
+           LEFT JOIN accounts a ON a.id = j.account_id
+           LEFT JOIN instruments i ON i.id = j.instrument_id
+           ORDER BY j.entry_date DESC, j.id DESC`,
+      )
+      .all<JournalRow>(),
+    d1
+      .prepare(
+        "SELECT from_currency, to_currency, rate, rate_date, source FROM exchange_rates ORDER BY rate_date",
+      )
+      .all<import("@/lib/calculations").ExchangeRateRow>(),
+    d1
+      .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
+      .all<{ key: string; value: string }>(),
+  ]);
   return {
     ...calculatePortfolio(
       accounts.results,
@@ -339,7 +960,9 @@ async function loadPortfolio() {
       prices.results,
       plans.results,
       targets.results,
+      exchangeRates.results,
     ),
+    journal: journal.results,
     navSync: navSyncFromRows(navSyncRows.results),
   };
 }
@@ -385,6 +1008,92 @@ function hasTrustedWriteOrigin(request: Request) {
   }
 }
 
+const journalDecisions = new Set(["BUY", "HOLD", "SELL", "WATCH", "REVIEW"]);
+const journalMoods = new Set(["CALM", "CONFIDENT", "ANXIOUS", "FOMO"]);
+
+function parseJournalPayload(body: Record<string, unknown>) {
+  const optionalId = (key: string) => {
+    const raw = String(body[key] ?? "").trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value <= 0)
+      throw new Error("复盘关联对象无效");
+    return value;
+  };
+  const title = String(body.title ?? "").trim();
+  if (!title) throw new Error("请填写复盘标题");
+  const decision = String(body.decision ?? "REVIEW").toUpperCase();
+  const mood = String(body.mood ?? "CALM").toUpperCase();
+  if (!journalDecisions.has(decision)) throw new Error("复盘动作无效");
+  if (!journalMoods.has(mood)) throw new Error("复盘情绪无效");
+  const reviewDateInput = String(body.reviewDate ?? "").trim();
+  return {
+    accountId: optionalId("accountId"),
+    instrumentId: optionalId("instrumentId"),
+    entryDate: isoDate(body.entryDate),
+    title: title.slice(0, 100),
+    decision,
+    mood,
+    thesis: String(body.thesis ?? "")
+      .trim()
+      .slice(0, 4000),
+    reviewDate: reviewDateInput ? isoDate(reviewDateInput) : "",
+    reviewNote: String(body.reviewNote ?? "")
+      .trim()
+      .slice(0, 4000),
+  };
+}
+
+async function assertJournalReferences(
+  d1: D1Database,
+  payload: ReturnType<typeof parseJournalPayload>,
+) {
+  const checks: Array<Promise<unknown>> = [];
+  if (payload.accountId)
+    checks.push(
+      d1
+        .prepare("SELECT id FROM accounts WHERE id = ?")
+        .bind(payload.accountId)
+        .first()
+        .then((row) => {
+          if (!row) throw new Error("关联账户不存在");
+        }),
+    );
+  if (payload.instrumentId)
+    checks.push(
+      d1
+        .prepare("SELECT id FROM instruments WHERE id = ?")
+        .bind(payload.instrumentId)
+        .first()
+        .then((row) => {
+          if (!row) throw new Error("关联产品不存在");
+        }),
+    );
+  await Promise.all(checks);
+}
+
+async function assertAllocationTargetInstruments(
+  d1: D1Database,
+  targets: ParsedAllocationTarget[],
+) {
+  const instrumentIds = [
+    ...new Set(
+      targets
+        .map((target) => target.instrumentId)
+        .filter((instrumentId) => instrumentId > CASH_INSTRUMENT_ID),
+    ),
+  ];
+  if (!instrumentIds.length) return;
+  const placeholders = instrumentIds.map(() => "?").join(", ");
+  const existing = await d1
+    .prepare(`SELECT id FROM instruments WHERE id IN (${placeholders})`)
+    .bind(...instrumentIds)
+    .all<{ id: number }>();
+  const existingIds = new Set(existing.results.map((row) => row.id));
+  if (instrumentIds.some((instrumentId) => !existingIds.has(instrumentId)))
+    throw new Error("配置目标包含不存在的产品");
+}
+
 export async function POST(request: Request) {
   const fetchSite = request.headers.get("sec-fetch-site");
   if (fetchSite === "cross-site" || !hasTrustedWriteOrigin(request)) {
@@ -396,6 +1105,7 @@ export async function POST(request: Request) {
     const d1 = getD1();
     const body = (await request.json()) as Record<string, unknown>;
     const action = String(body.action ?? "");
+    let mutationResult: Record<string, number> = {};
 
     if (action === "syncAllFunds") {
       const previousSync = await readNavSync(d1);
@@ -477,13 +1187,76 @@ export async function POST(request: Request) {
       return Response.json(await fetchLiveFundData(String(body.code ?? "")));
     }
 
-    if (action === "resolveInstrument") {
-      const resolved = await resolveFundInstrument(
+    if (action === "lookupInstrument") {
+      const preferredProductType = parsePreferredProductType(
+        body.preferredProductType,
+      );
+      const lookedUp = await lookupInvestmentInstrument(
         d1,
         String(body.code ?? ""),
         String(body.tradeDate ?? ""),
+        preferredProductType,
+      );
+      return Response.json(lookedUp);
+    }
+
+    if (action === "resolveInstrument") {
+      const preferredProductType = parsePreferredProductType(
+        body.preferredProductType,
+      );
+      const resolved = await resolveInvestmentInstrument(
+        d1,
+        String(body.code ?? ""),
+        String(body.tradeDate ?? ""),
+        preferredProductType,
       );
       return Response.json(resolved);
+    }
+
+    if (action === "syncAccountNamesFromLatestBuys") {
+      const latestBuys = await d1
+        .prepare(
+          `SELECT a.id AS account_id, a.name AS current_name,
+                  l.instrument_id, i.name AS instrument_name
+             FROM accounts a
+             JOIN ledger_entries l ON l.id = (
+               SELECT latest.id
+                 FROM ledger_entries latest
+                WHERE latest.account_id = a.id
+                  AND latest.kind = 'BUY'
+                  AND latest.instrument_id IS NOT NULL
+                ORDER BY latest.trade_date DESC, latest.id DESC
+                LIMIT 1
+             )
+             JOIN instruments i ON i.id = l.instrument_id
+            ORDER BY a.id`,
+        )
+        .all<{
+          account_id: number;
+          current_name: string;
+          instrument_id: number;
+          instrument_name: string;
+        }>();
+      const updates = accountRenameUpdatesFromLatestBuys(
+        latestBuys.results.map((row) => ({
+          accountId: row.account_id,
+          currentName: row.current_name,
+          instrumentId: row.instrument_id,
+          instrumentName: row.instrument_name,
+        })),
+      );
+      if (updates.length)
+        await d1.batch(
+          updates.map((update) =>
+            d1
+              .prepare("UPDATE accounts SET name = ? WHERE id = ?")
+              .bind(update.name, update.accountId),
+          ),
+        );
+      return Response.json({
+        ...(await loadPortfolio()),
+        renamedCount: updates.length,
+      });
     }
 
     if (action === "createEntry") {
@@ -553,13 +1326,15 @@ export async function POST(request: Request) {
             const live = await fetchLiveFundData(instrument.code);
             await d1
               .prepare(
-                "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ?",
+                "UPDATE instruments SET name = ?, asset_class = ?, product_type = ?, buy_fee_bps = ?, management_fee_bps = ?, custodian_fee_bps = ?, eastmoney_fee_bps = ?, min_purchase_units = ?, redemption_fee_json = CASE WHEN ? = 1 THEN ? ELSE redemption_fee_json END, data_source = ?, source_updated_at = ? WHERE id = ?",
               )
               .bind(
                 live.name,
                 live.assetClass,
                 live.productType,
                 live.standardBuyFeeBps,
+                live.managementFeeBps,
+                live.custodianFeeBps,
                 live.eastmoneyBuyFeeBps,
                 decimalToUnits(live.minPurchase),
                 live.redemptionFeeAvailable ? 1 : 0,
@@ -589,7 +1364,7 @@ export async function POST(request: Request) {
             // Keep the last synchronized rules when the external source is unavailable.
           }
         }
-        if (kind === "SELL") {
+        if (kind === "SELL" && instrument.product_type === "FUND") {
           const history = await d1
             .prepare(
               "SELECT kind, trade_date, quantity_units FROM ledger_entries WHERE account_id = ? AND instrument_id = ? AND trade_date <= ? AND kind IN ('BUY','SELL') ORDER BY trade_date, id",
@@ -628,19 +1403,27 @@ export async function POST(request: Request) {
           feeSource = tiers.length ? "LIVE_REDEMPTION_FIFO" : "PRODUCT_RULE";
         } else {
           const channelRate =
-            purchaseChannel === "EASTMONEY" && instrument.eastmoney_fee_bps > 0
+            kind === "BUY" &&
+            purchaseChannel === "EASTMONEY" &&
+            instrument.eastmoney_fee_bps > 0
               ? instrument.eastmoney_fee_bps
               : instrument.buy_fee_bps;
-          feeUnits = calculateTradingFeeUnits("BUY", grossAmountUnits, {
-            buyFeeBps: channelRate,
-            buyDiscountBps: 10_000,
-            sellFeeBps: instrument.sell_fee_bps,
-            minFeeUnits: instrument.min_fee_units,
-          });
+          feeUnits = calculateTradingFeeUnits(
+            kind === "SELL" ? "SELL" : "BUY",
+            grossAmountUnits,
+            {
+              buyFeeBps: channelRate,
+              buyDiscountBps: 10_000,
+              sellFeeBps: instrument.sell_fee_bps,
+              minFeeUnits: instrument.min_fee_units,
+            },
+          );
           feeSource =
-            purchaseChannel === "EASTMONEY"
-              ? "LIVE_EASTMONEY"
-              : "LIVE_STANDARD";
+            kind === "SELL"
+              ? "PRODUCT_RULE"
+              : purchaseChannel === "EASTMONEY"
+                ? "LIVE_EASTMONEY"
+                : "LIVE_STANDARD";
         }
       }
       if (kind === "SELL" && instrumentId) {
@@ -654,42 +1437,71 @@ export async function POST(request: Request) {
         if (quantityUnits > Number(position?.available ?? 0))
           throw new Error("卖出份额超过该日期的可用持仓");
       }
-      await d1
-        .prepare(
-          `INSERT INTO ledger_entries
+      let officialAccountName: string | null = null;
+      if (
+        kind === "BUY" &&
+        body.autoRenameAccount === true &&
+        Number.isInteger(instrumentId) &&
+        Number(instrumentId) > 0
+      ) {
+        const officialInstrument = await d1
+          .prepare("SELECT name FROM instruments WHERE id = ?")
+          .bind(instrumentId)
+          .first<{ name: string }>();
+        if (!officialInstrument) throw new Error("基金/证券代码不存在");
+        officialAccountName = accountNameForEntry({
+          kind,
+          autoRenameAccount: body.autoRenameAccount,
+          instrumentId,
+          instrumentName: officialInstrument.name,
+        });
+        if (!officialAccountName) throw new Error("产品正式名称不能为空");
+      }
+      const entryStatements = [
+        d1
+          .prepare(
+            `INSERT INTO ledger_entries
         (account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          accountId,
-          instrumentId,
-          kind,
-          tradeDate,
-          confirmationDate,
-          quantityUnits,
-          priceUnits,
-          grossAmountUnits,
-          feeUnits,
-          decimalToUnits(body.tax),
-          String(body.notes ?? "").slice(0, 200),
-          String(body.externalRef ?? "").slice(0, 100),
-          purchaseChannel.slice(0, 30),
-          feeSource.slice(0, 40),
-        )
-        .run();
+          )
+          .bind(
+            accountId,
+            instrumentId,
+            kind,
+            tradeDate,
+            confirmationDate,
+            quantityUnits,
+            priceUnits,
+            grossAmountUnits,
+            feeUnits,
+            decimalToUnits(body.tax),
+            String(body.notes ?? "").slice(0, 200),
+            String(body.externalRef ?? "").slice(0, 100),
+            purchaseChannel.slice(0, 30),
+            feeSource.slice(0, 40),
+          ),
+      ];
       if (instrumentId && priceUnits) {
-        await d1
-          .prepare(
-            `INSERT INTO prices (instrument_id, price_date, price_units, source)
+        entryStatements.push(
+          d1
+            .prepare(
+              `INSERT INTO prices (instrument_id, price_date, price_units, source)
              VALUES (?, ?, ?, 'TRADE')
              ON CONFLICT(instrument_id, price_date) DO UPDATE SET
                price_units = excluded.price_units,
                source = excluded.source
              WHERE prices.source = 'TRADE'`,
-          )
-          .bind(instrumentId, isoDate(body.tradeDate), priceUnits)
-          .run();
+            )
+            .bind(instrumentId, isoDate(body.tradeDate), priceUnits),
+        );
       }
+      if (officialAccountName)
+        entryStatements.push(
+          d1
+            .prepare("UPDATE accounts SET name = ? WHERE id = ?")
+            .bind(officialAccountName, accountId),
+        );
+      await d1.batch(entryStatements);
     } else if (action === "createAccount") {
       const name = String(body.name ?? "").trim();
       if (!name) throw new Error("账户名称不能为空");
@@ -728,6 +1540,56 @@ export async function POST(request: Request) {
         .bind(accountId)
         .run();
       if (!Number(deleted.meta.changes ?? 0)) throw new Error("账户不存在");
+    } else if (action === "deleteAccountInstrument") {
+      const accountId = positiveIntegerId(body.accountId, "账户");
+      const instrumentId = positiveIntegerId(body.instrumentId, "产品");
+      const [entryUsage, planUsage] = await Promise.all([
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM ledger_entries WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId)
+          .first<{ count: number }>(),
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM recurring_plans WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId)
+          .first<{ count: number }>(),
+      ]);
+      const deletedEntries = Number(entryUsage?.count ?? 0);
+      const deletedPlans = Number(planUsage?.count ?? 0);
+      if (!deletedEntries && !deletedPlans)
+        throw new Error("该账户中不存在这个产品的流水或定投计划");
+
+      await d1.batch([
+        d1
+          .prepare(
+            "DELETE FROM ledger_entries WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId),
+        d1
+          .prepare(
+            "DELETE FROM recurring_plans WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId),
+        d1
+          .prepare(
+            `UPDATE accounts
+             SET name = COALESCE(
+               (SELECT substr(trim(i.name), 1, 50)
+                  FROM ledger_entries l
+                  JOIN instruments i ON i.id = l.instrument_id
+                 WHERE l.account_id = accounts.id AND l.kind = 'BUY'
+                 ORDER BY l.trade_date DESC, l.id DESC
+                 LIMIT 1),
+               name
+             )
+             WHERE id = ?`,
+          )
+          .bind(accountId),
+      ]);
+      mutationResult = { deletedEntries, deletedPlans };
     } else if (action === "createInstrument") {
       const name = String(body.name ?? "").trim();
       const code = String(body.code ?? "")
@@ -787,6 +1649,18 @@ export async function POST(request: Request) {
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
+      const [account, instrument] = await Promise.all([
+        d1
+          .prepare("SELECT id FROM accounts WHERE id = ?")
+          .bind(accountId)
+          .first<{ id: number }>(),
+        d1
+          .prepare("SELECT id FROM instruments WHERE id = ?")
+          .bind(instrumentId)
+          .first<{ id: number }>(),
+      ]);
+      if (!account) throw new Error("投资账户不存在");
+      if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       await d1
         .prepare(
           "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, day_of_month, next_date) VALUES (?, ?, ?, ?, ?)",
@@ -808,6 +1682,18 @@ export async function POST(request: Request) {
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
+      const [account, instrument] = await Promise.all([
+        d1
+          .prepare("SELECT id FROM accounts WHERE id = ?")
+          .bind(accountId)
+          .first<{ id: number }>(),
+        d1
+          .prepare("SELECT id FROM instruments WHERE id = ?")
+          .bind(instrumentId)
+          .first<{ id: number }>(),
+      ]);
+      if (!account) throw new Error("投资账户不存在");
+      if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       const updated = await d1
         .prepare(
           "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, day_of_month = ?, next_date = ? WHERE id = ?",
@@ -832,50 +1718,137 @@ export async function POST(request: Request) {
         .bind(planId)
         .run();
     } else if (action === "updateTarget") {
-      const instrumentId = Number(body.instrumentId);
-      const targetBps = Math.round(Number(body.targetPercent) * 100);
-      const alertBps = Math.round(Number(body.alertPercent ?? 5) * 100);
-      await d1
+      const target = parseAllocationTarget(body);
+      await assertAllocationTargetInstruments(d1, [target]);
+      const savedProducts = await d1
         .prepare(
-          "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, ?) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps, alert_bps = excluded.alert_bps",
+          "SELECT instrument_id, target_bps FROM allocation_targets WHERE instrument_id > 0",
         )
-        .bind(instrumentId, targetBps, alertBps)
-        .run();
-    } else if (action === "updateTargets") {
-      const targets = Array.isArray(body.targets)
-        ? (body.targets.slice(0, 100) as Array<Record<string, unknown>>)
-        : [];
-      if (!targets.length) throw new Error("没有可保存的配置目标");
-      const invalidTarget = targets.some((target) => {
-        const instrumentId = Number(target.instrumentId);
-        const targetPercent = Number(target.targetPercent);
-        return (
-          !Number.isInteger(instrumentId) ||
-          instrumentId <= 0 ||
-          !Number.isFinite(targetPercent) ||
-          targetPercent < 0 ||
-          targetPercent > 100
-        );
-      });
-      if (invalidTarget) throw new Error("配置目标数据无效");
-      const total = targets.reduce(
-        (sum, target) => sum + Number(target.targetPercent ?? 0),
+        .all<{ instrument_id: number; target_bps: number }>();
+      const productBps = new Map(
+        savedProducts.results.map((row) => [row.instrument_id, row.target_bps]),
+      );
+      if (target.instrumentId > CASH_INSTRUMENT_ID)
+        productBps.set(target.instrumentId, target.targetBps);
+      const productTotalBps = [...productBps.values()].reduce(
+        (sum, targetBps) => sum + targetBps,
         0,
       );
-      if (Math.abs(total - 100) > 0.01)
-        throw new Error("配置目标合计必须等于 100%");
+      if (productTotalBps > TOTAL_ALLOCATION_BPS)
+        throw new Error("产品目标合计不能超过 10000 基点（100%）");
+      const derivedCashBps = TOTAL_ALLOCATION_BPS - productTotalBps;
+      if (
+        target.instrumentId === CASH_INSTRUMENT_ID &&
+        target.targetBps !== derivedCashBps
+      )
+        throw new Error("现金目标必须等于 100% 减去全部产品目标");
+
+      const targetAlertBps = target.alertBps ?? DEFAULT_ALLOCATION_ALERT_BPS;
+      const targetUpsert =
+        target.alertBps === undefined
+          ? d1
+              .prepare(
+                "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, ?) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps",
+              )
+              .bind(target.instrumentId, target.targetBps, targetAlertBps)
+          : d1
+              .prepare(
+                "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, ?) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps, alert_bps = excluded.alert_bps",
+              )
+              .bind(target.instrumentId, target.targetBps, targetAlertBps);
+      const cashUpsert = d1
+        .prepare(
+          "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (0, ?, 500) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps",
+        )
+        .bind(derivedCashBps);
       await d1.batch(
-        targets.map((target) =>
-          d1
-            .prepare(
-              "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, 500) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps, alert_bps = excluded.alert_bps",
-            )
-            .bind(
-              Number(target.instrumentId),
-              Math.round(Number(target.targetPercent) * 100),
-            ),
-        ),
+        target.instrumentId === CASH_INSTRUMENT_ID
+          ? [targetUpsert]
+          : [targetUpsert, cashUpsert],
       );
+    } else if (action === "updateTargets") {
+      const targets = parseAllocationTargets(body.targets);
+      await assertAllocationTargetInstruments(d1, targets);
+      const ids = targets.map((target) => target.instrumentId);
+      const placeholders = ids.map(() => "?").join(", ");
+      await d1.batch([
+        d1
+          .prepare(
+            `DELETE FROM allocation_targets WHERE instrument_id NOT IN (${placeholders})`,
+          )
+          .bind(...ids),
+        ...targets.map((target) => {
+          const statement =
+            target.alertBps === undefined
+              ? "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, ?) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps"
+              : "INSERT INTO allocation_targets (instrument_id, target_bps, alert_bps) VALUES (?, ?, ?) ON CONFLICT(instrument_id) DO UPDATE SET target_bps = excluded.target_bps, alert_bps = excluded.alert_bps";
+          return d1
+            .prepare(statement)
+            .bind(
+              target.instrumentId,
+              target.targetBps,
+              target.alertBps ?? DEFAULT_ALLOCATION_ALERT_BPS,
+            );
+        }),
+      ]);
+    } else if (action === "createJournal") {
+      const journal = parseJournalPayload(body);
+      await assertJournalReferences(d1, journal);
+      await d1
+        .prepare(
+          `INSERT INTO investment_journal
+           (account_id, instrument_id, entry_date, title, decision, mood, thesis, review_date, review_note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          journal.accountId,
+          journal.instrumentId,
+          journal.entryDate,
+          journal.title,
+          journal.decision,
+          journal.mood,
+          journal.thesis,
+          journal.reviewDate,
+          journal.reviewNote,
+        )
+        .run();
+    } else if (action === "updateJournal") {
+      const journalId = Number(body.id);
+      if (!Number.isInteger(journalId) || journalId <= 0)
+        throw new Error("复盘记录不存在");
+      const journal = parseJournalPayload(body);
+      await assertJournalReferences(d1, journal);
+      const updated = await d1
+        .prepare(
+          `UPDATE investment_journal
+           SET account_id = ?, instrument_id = ?, entry_date = ?, title = ?,
+               decision = ?, mood = ?, thesis = ?, review_date = ?, review_note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+        )
+        .bind(
+          journal.accountId,
+          journal.instrumentId,
+          journal.entryDate,
+          journal.title,
+          journal.decision,
+          journal.mood,
+          journal.thesis,
+          journal.reviewDate,
+          journal.reviewNote,
+          journalId,
+        )
+        .run();
+      if (!Number(updated.meta.changes ?? 0)) throw new Error("复盘记录不存在");
+    } else if (action === "deleteJournal") {
+      const journalId = Number(body.id);
+      if (!Number.isInteger(journalId) || journalId <= 0)
+        throw new Error("复盘记录不存在");
+      const deleted = await d1
+        .prepare("DELETE FROM investment_journal WHERE id = ?")
+        .bind(journalId)
+        .run();
+      if (!Number(deleted.meta.changes ?? 0)) throw new Error("复盘记录不存在");
     } else if (action === "syncInstrument") {
       const instrumentId = Number(body.instrumentId);
       const instrument = await d1
@@ -1003,10 +1976,22 @@ export async function POST(request: Request) {
         .prepare("DELETE FROM recurring_plans WHERE id = ?")
         .bind(Number(body.id))
         .run();
+    } else if (action === "deleteInstrument") {
+      const instrumentId = positiveIntegerId(body.instrumentId, "产品");
+      const usage = await d1
+        .prepare("SELECT COUNT(*) AS cnt FROM ledger_entries WHERE instrument_id = ? AND (kind = 'BUY' OR kind = 'SELL')")
+        .bind(instrumentId)
+        .first<{ cnt: number }>();
+      if (Number(usage?.cnt ?? 0) > 0)
+        throw new Error("该产品有买卖交易记录，无法删除");
+      await d1
+        .prepare("DELETE FROM instruments WHERE id = ?")
+        .bind(instrumentId)
+        .run();
     } else {
       throw new Error("未知操作");
     }
-    return Response.json(await loadPortfolio());
+    return Response.json({ ...(await loadPortfolio()), ...mutationResult });
   } catch (error) {
     const message = error instanceof Error ? error.message : "保存失败";
     return Response.json({ error: message }, { status: 400 });

@@ -24,6 +24,8 @@ export interface LiveFundData {
   redemptionTiers: RedemptionFeeTier[];
   redemptionFeeAvailable: boolean;
   profileDataAvailable: boolean;
+  managementFeeBps: number;
+  custodianFeeBps: number;
   source: "EASTMONEY";
   updatedAt: string;
 }
@@ -33,6 +35,11 @@ export interface FundNavPoint {
   nav: number;
 }
 
+export interface FundHistoryPoint extends FundNavPoint {
+  dailyReturnPercent: number;
+  totalReturnNav: number;
+}
+
 export type FundNavSource = "OFFICIAL_EFUNDS" | "EASTMONEY";
 
 export interface FundNavQuote extends FundNavPoint {
@@ -40,6 +47,16 @@ export interface FundNavQuote extends FundNavPoint {
   source: FundNavSource;
   isOfficial: boolean;
   fetchedAt: string;
+}
+
+export interface FundNavHistory {
+  code: string;
+  points: FundHistoryPoint[];
+  source: "EASTMONEY";
+  sourceLabel: "天天基金";
+  returnMethod: "DIVIDEND_REINVESTED";
+  updatedAt: string;
+  latestDate: string;
 }
 
 export function selectFundNav(
@@ -83,7 +100,7 @@ export function parseEfundsOfficialNav(html: string): FundNavPoint | null {
   return { date, nav };
 }
 
-function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
+export function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
   const navStart = script.indexOf("var Data_netWorthTrend");
   const navEnd = navStart >= 0 ? script.indexOf("];", navStart) : -1;
   const navBlock =
@@ -102,6 +119,65 @@ function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
   return points;
 }
 
+/**
+ * Build a synthetic total-return NAV from the provider's published daily
+ * return series. The daily return already includes cash distributions on the
+ * ex-dividend date; compounding it is equivalent to reinvesting distributions
+ * and avoids treating a dividend-related NAV drop as an investment loss.
+ */
+export function parseEastmoneyTotalReturnPoints(
+  script: string,
+): FundHistoryPoint[] {
+  const marker = "var Data_netWorthTrend";
+  const markerIndex = script.indexOf(marker);
+  const arrayStart = markerIndex >= 0 ? script.indexOf("[", markerIndex) : -1;
+  const arrayEnd = arrayStart >= 0 ? script.indexOf("];", arrayStart) : -1;
+  if (arrayStart < 0 || arrayEnd <= arrayStart) return [];
+  let rows: unknown;
+  try {
+    rows = JSON.parse(script.slice(arrayStart, arrayEnd + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(rows)) return [];
+  const normalized = rows
+    .map((row) => {
+      const value = row as Record<string, unknown>;
+      const timestamp = Number(value.x);
+      const nav = Number(value.y);
+      const dailyReturnPercent = Number(value.equityReturn);
+      const date = timestamp
+        ? new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        : "";
+      return { date, nav, dailyReturnPercent };
+    })
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.nav) &&
+        point.nav > 0 &&
+        Number.isFinite(point.dailyReturnPercent),
+    )
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter(
+      (point, index, ordered) =>
+        index === ordered.length - 1 || point.date !== ordered[index + 1].date,
+    );
+  let totalReturnNav = 0;
+  return normalized.map((point, index) => {
+    if (index === 0) totalReturnNav = point.nav;
+    else {
+      const factor = 1 + point.dailyReturnPercent / 100;
+      const previous = normalized[index - 1];
+      totalReturnNav *=
+        Number.isFinite(factor) && factor > 0
+          ? factor
+          : point.nav / previous.nav;
+    }
+    return { ...point, totalReturnNav };
+  });
+}
+
 export function parseEastmoneyLatestNav(script: string): FundNavPoint | null {
   return selectFundNav(parseEastmoneyNavPoints(script));
 }
@@ -117,6 +193,38 @@ async function fetchText(url: string, timeoutMs: number) {
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.text();
+}
+
+/**
+ * Load the published historical unit-NAV series for one six-digit fund code.
+ * The URL is constructed locally from the validated code, so callers cannot
+ * turn this helper into an arbitrary remote URL fetcher.
+ */
+export async function fetchFundNavHistory(
+  codeInput: string,
+): Promise<FundNavHistory> {
+  const code = codeInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("基金或 ETF 代码应为 6 位数字");
+  let script = "";
+  try {
+    script = await fetchText(
+      `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
+      8_000,
+    );
+  } catch {
+    throw new Error("历史净值数据源暂时不可用");
+  }
+  const points = parseEastmoneyTotalReturnPoints(script);
+  if (!points.length) throw new Error("未查询到该基金的历史净值");
+  return {
+    code,
+    points,
+    source: "EASTMONEY",
+    sourceLabel: "天天基金",
+    returnMethod: "DIVIDEND_REINVESTED",
+    updatedAt: new Date().toISOString(),
+    latestDate: points.at(-1)!.date,
+  };
 }
 
 /**
@@ -152,6 +260,32 @@ export async function fetchLatestFundNav(
     }
   }
 
+  // Try the jjjz history page first for latest NAV (more up-to-date than pingzhongdata)
+  try {
+    const html = await fetchText(
+      `https://fundf10.eastmoney.com/jjjz_${code}.html`,
+      6_000,
+    );
+    const navMatch = html.match(/单位净值.（\d{2}-\d{2}）[\s\S]{0,60}?<b[^>]*>[\s\r\n]*([0-9.]+)/);
+    if (navMatch) {
+      const today = new Date();
+      const year = today.getFullYear();
+      const monthDay = navMatch[1];
+      const nav = Number(navMatch[2]);
+      const jjjzDate = year + "-" + monthDay;
+      if (nav > 0 && /^\d{4}-\d{2}-\d{2}$/.test(jjjzDate)) {
+        return {
+          code,
+          date: jjjzDate,
+          nav,
+          source: "EASTMONEY",
+          isOfficial: false,
+          fetchedAt: new Date().toISOString(),
+        };
+      }
+    }
+  } catch {}
+  // Fallback: use pingzhongdata.js (slightly delayed but reliable)
   let script = "";
   try {
     script = await fetchText(
@@ -178,6 +312,16 @@ const plainText = (value: string) =>
     .replace(/&nbsp;|&#160;/gi, " ")
     .replace(/&amp;/gi, "&")
     .trim();
+
+export function parseManagementFees(html: string): { managementFeeBps: number; custodianFeeBps: number } {
+  let managementFeeBps = 0;
+  let custodianFeeBps = 0;
+  const mgmtMatch = html.match(/管理费率[\s\S]{0,100}?([\d.]+)%/);
+  if (mgmtMatch) managementFeeBps = Math.round(Number(mgmtMatch[1]) * 100);
+  const custMatch = html.match(/托管费率[\s\S]{0,100}?([\d.]+)%/);
+  if (custMatch) custodianFeeBps = Math.round(Number(custMatch[1]) * 100);
+  return { managementFeeBps, custodianFeeBps };
+}
 
 export function parseFundCategory(profileHtml: string) {
   const tableMatch = profileHtml.match(
@@ -326,6 +470,7 @@ export async function fetchLiveFundData(
   const feeHtml = feeResponse?.ok ? await feeResponse.text() : "";
   const profileHtml = profileResponse?.ok ? await profileResponse.text() : "";
   const fundCategory = parseFundCategory(profileHtml);
+  const fees = parseManagementFees(profileHtml);
   const classification = classifyFund(code, name, fundCategory);
   return {
     code,
@@ -344,6 +489,8 @@ export async function fetchLiveFundData(
     redemptionTiers: parseRedemptionTiers(feeHtml),
     redemptionFeeAvailable: feeResponse?.ok === true,
     profileDataAvailable: profileResponse?.ok === true,
+    managementFeeBps: fees.managementFeeBps,
+    custodianFeeBps: fees.custodianFeeBps,
     source: "EASTMONEY",
     updatedAt: new Date().toISOString(),
   };

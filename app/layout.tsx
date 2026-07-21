@@ -15,8 +15,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const image = `${protocol}://${host}/og.png`;
   return {
     title: "盈迹 · 个人投资收益账本",
-    description:
-      "专业记录基金、股票与 ETF 的真实收益、资金回报、资产配置与风险。",
+    description: "专业记录基金、股票与 ETF 的真实收益、资金回报、资产配置与风险。",
     icons: { icon: "/og.png", shortcut: "/og.png" },
     openGraph: {
       title: "盈迹 · 个人投资收益账本",
@@ -37,7 +36,9 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        {children}
+      </body>
     </html>
   );
 }

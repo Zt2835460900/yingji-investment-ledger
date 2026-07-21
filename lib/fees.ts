@@ -62,7 +62,7 @@ export function calculateFifoRedemptionFeeUnits(
     const tier = tiers.find(
       (item) => heldDays >= item.minDays && (item.maxDays === null || heldDays < item.maxDays),
     );
-    if (tier) fee += (grossAmountUnits * (take / quantityUnits) * tier.rateBps) / 10_000;
+    if (tier) fee += Number(BigInt(grossAmountUnits) * BigInt(take) * BigInt(tier.rateBps) / (BigInt(quantityUnits) * BigInt(10000)));
     remaining -= take;
   }
   return Math.round(fee);

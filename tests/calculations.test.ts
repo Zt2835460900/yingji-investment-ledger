@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { calculatePortfolio, calculateXirr } from "../lib/calculations";
+import {
+  parseAllocationTarget,
+  parseAllocationTargets,
+} from "../lib/allocation-targets";
 import { calculateTradingFeeUnits } from "../lib/fees";
 import { calculateFifoRedemptionFeeUnits } from "../lib/fees";
 import {
@@ -21,6 +25,7 @@ import type {
   InstrumentRow,
   LedgerRow,
   PriceRow,
+  TargetRow,
 } from "../lib/types";
 
 test("XIRR matches a one-year 10% return", () => {
@@ -400,6 +405,154 @@ function accountingPrice(
   };
 }
 
+function accountingTarget(
+  id: number,
+  instrumentId: number,
+  targetBps: number,
+  alertBps = 500,
+): TargetRow {
+  return {
+    id,
+    instrument_id: instrumentId,
+    target_bps: targetBps,
+    alert_bps: alertBps,
+  };
+}
+
+test("allocation target payload derives a cash target from the product remainder", () => {
+  assert.deepEqual(
+    parseAllocationTargets([
+      { instrumentId: 1, targetBps: 6_000, alertBps: 300 },
+      { instrumentId: 2, targetPercent: 20 },
+    ]),
+    [
+      { instrumentId: 1, targetBps: 6_000, alertBps: 300 },
+      { instrumentId: 2, targetBps: 2_000, alertBps: undefined },
+      { instrumentId: 0, targetBps: 2_000 },
+    ],
+  );
+});
+
+test("allocation target payload validates exact bps, duplicates, and cash authority", () => {
+  assert.throws(
+    () =>
+      parseAllocationTargets([
+        { instrumentId: 1, targetBps: 8_000 },
+        { instrumentId: 0, targetBps: 1_000 },
+      ]),
+    /现金目标/,
+  );
+  assert.throws(
+    () =>
+      parseAllocationTargets([
+        { instrumentId: 1, targetBps: 5_000 },
+        { instrumentId: 1, targetBps: 5_000 },
+      ]),
+    /不能重复/,
+  );
+  assert.throws(
+    () => parseAllocationTargets([{ instrumentId: 1, targetBps: 10_001 }]),
+    /10000/,
+  );
+  assert.throws(
+    () => parseAllocationTarget({ instrumentId: 1, targetPercent: 80.001 }),
+    /最多两位小数/,
+  );
+});
+
+test("allocation reports an exact 80% product and 20% cash target", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "DEPOSIT", { instrumentId: null, gross: 10_000 }),
+      accountingEntry(2, "BUY", { quantity: 800, price: 10 }),
+    ],
+    [accountingPrice(1, 10)],
+    [],
+    [accountingTarget(1, 1, 8_000), accountingTarget(2, 0, 2_000)],
+  );
+  const product = result.allocation.find((item) => item.instrumentId === 1)!;
+  const cash = result.allocation.find((item) => item.instrumentId === 0)!;
+
+  assert.equal(product.actual, 0.8);
+  assert.equal(product.target, 0.8);
+  assert.equal(product.alert, false);
+  assert.equal(cash.value, 2_000);
+  assert.equal(cash.actual, 0.2);
+  assert.equal(cash.target, 0.2);
+  assert.equal(cash.drift, 0);
+  assert.equal(cash.alert, false);
+});
+
+test("cash allocation exposes underweight drift even when current cash is zero", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [accountingEntry(1, "BUY", { quantity: 1_000, price: 10 })],
+    [accountingPrice(1, 10)],
+    [],
+    [accountingTarget(1, 1, 8_000), accountingTarget(2, 0, 2_000)],
+  );
+  const cash = result.allocation.find((item) => item.instrumentId === 0)!;
+
+  assert.equal(cash.value, 0);
+  assert.equal(cash.actual, 0);
+  assert.equal(cash.target, 0.2);
+  assert.equal(cash.drift, -0.2);
+  assert.equal(cash.alert, true);
+});
+
+test("legacy product-only targets derive cash while complete targets keep cash at zero", () => {
+  const ledger = [
+    accountingEntry(1, "DEPOSIT", { instrumentId: null, gross: 10_000 }),
+    accountingEntry(2, "BUY", { quantity: 900, price: 10 }),
+  ];
+  const prices = [accountingPrice(1, 10)];
+  const derived = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    ledger,
+    prices,
+    [],
+    [accountingTarget(1, 1, 8_000)],
+  );
+  const derivedCash = derived.allocation.find(
+    (item) => item.instrumentId === 0,
+  )!;
+  assert.equal(derivedCash.target, 0.2);
+  assert.ok(Math.abs(derivedCash.drift + 0.1) < 1e-12);
+  assert.equal(derivedCash.alert, true);
+
+  const complete = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    ledger,
+    prices,
+    [],
+    [accountingTarget(1, 1, 10_000)],
+  );
+  const completeCash = complete.allocation.find(
+    (item) => item.instrumentId === 0,
+  )!;
+  assert.equal(completeCash.target, 0);
+  assert.equal(completeCash.alert, true);
+
+  const unconfigured = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    ledger,
+    prices,
+    [],
+    [],
+  );
+  const unconfiguredCash = unconfigured.allocation.find(
+    (item) => item.instrumentId === 0,
+  )!;
+  assert.equal(unconfiguredCash.target, 0);
+  assert.equal(unconfiguredCash.alert, false);
+});
+
 test("an open profitable holding is included in total assets", () => {
   const result = calculatePortfolio(
     [accountingAccount],
@@ -420,6 +573,40 @@ test("an open profitable holding is included in total assets", () => {
     result.metrics.totalAssets,
     result.metrics.netContributions + result.metrics.totalProfit,
   );
+});
+
+test("break-even progress includes buy fees for a losing holding", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [accountingEntry(1, "BUY", { quantity: 100, price: 10, fee: 10 })],
+    [accountingPrice(1, 9)],
+    [],
+    [],
+  );
+
+  const holding = result.holdings[0];
+  assert.equal(holding.breakEvenPrice, 10.1);
+  assert.ok(Math.abs(holding.toBreakEvenRate! - (10.1 / 9 - 1)) < 1e-12);
+  assert.ok(Math.abs(holding.breakEvenProgress - 9 / 10.1) < 1e-12);
+  assert.ok(holding.breakEvenProgress < 1);
+});
+
+test("profitable holdings cap break-even progress while retaining their cushion", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [accountingEntry(1, "BUY", { quantity: 100, price: 10, fee: 10 })],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  const holding = result.holdings[0];
+  assert.equal(holding.breakEvenPrice, 10.1);
+  assert.equal(holding.breakEvenProgress, 1);
+  assert.ok(Math.abs(holding.toBreakEvenRate! - (10.1 / 12 - 1)) < 1e-12);
+  assert.ok(holding.toBreakEvenRate! < 0);
 });
 
 test("a partial sale stays as cash and realized profit remains in total assets", () => {
@@ -448,6 +635,56 @@ test("a partial sale stays as cash and realized profit remains in total assets",
   assert.equal(result.metrics.totalProfit, 320);
   assert.equal(result.accounts[0].cash, 600);
   assert.equal(result.accounts[0].securitiesValue, 720);
+  assert.equal(result.rankings[0].profit, 320);
+  assert.equal(result.rankings[0].returnRate, 0.2);
+});
+
+test("a partial sale preserves the break-even price of remaining moving-average cost", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10, fee: 10 }),
+      accountingEntry(2, "SELL", {
+        date: "2026-07-16",
+        quantity: 40,
+        price: 9,
+        fee: 6,
+      }),
+    ],
+    [accountingPrice(1, 10)],
+    [],
+    [],
+  );
+
+  const holding = result.holdings[0];
+  assert.equal(holding.quantity, 60);
+  assert.equal(holding.cost, 606);
+  assert.equal(holding.breakEvenPrice, 10.1);
+  assert.ok(Math.abs(holding.toBreakEvenRate! - 0.01) < 1e-12);
+  assert.ok(Math.abs(holding.breakEvenProgress - 10 / 10.1) < 1e-12);
+});
+
+test("a fully sold position produces no zero-quantity break-even holding", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", { quantity: 100, price: 10, fee: 10 }),
+      accountingEntry(2, "SELL", {
+        date: "2026-07-16",
+        quantity: 100,
+        price: 11,
+        fee: 5,
+      }),
+    ],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.deepEqual(result.holdings, []);
+  assert.equal(result.metrics.holdingCost, 0);
 });
 
 test("reusing retained sale proceeds does not increase invested capital", () => {
@@ -536,6 +773,30 @@ test("dividends remain as available cash until explicitly withdrawn", () => {
   assert.equal(result.metrics.cash, 50);
   assert.equal(result.metrics.totalAssets, 1_050);
   assert.equal(result.metrics.totalProfit, 50);
+});
+
+test("fund rankings aggregate the same fund across accounts", () => {
+  const secondAccount: AccountRow = {
+    ...accountingAccount,
+    id: 2,
+    name: "Second account",
+  };
+  const secondBuy: LedgerRow = {
+    ...accountingEntry(2, "BUY", { quantity: 50, price: 20 }),
+    account_id: 2,
+  };
+  const result = calculatePortfolio(
+    [accountingAccount, secondAccount],
+    [accountingInstrument()],
+    [accountingEntry(1, "BUY", { quantity: 100, price: 10 }), secondBuy],
+    [accountingPrice(1, 12)],
+    [],
+    [],
+  );
+
+  assert.equal(result.rankings.length, 1);
+  assert.equal(result.rankings[0].profit, -200);
+  assert.equal(result.rankings[0].returnRate, -0.1);
 });
 
 test("valuation freshness is derived conservatively from held instruments", () => {

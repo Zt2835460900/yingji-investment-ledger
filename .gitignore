@@ -41,3 +41,13 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Never publish local/server data or scratch copies.
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.bak
+*.bak*
+*_bak
+*服务器密码*

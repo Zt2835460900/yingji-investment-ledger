@@ -5,6 +5,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  BookOpen,
   CalendarDays,
   Check,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   Download,
   ExternalLink,
   FileSpreadsheet,
+  FlaskConical,
   Gauge,
   Home,
   Landmark,
@@ -51,11 +53,27 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  DcaSimulator,
+  FundLookthrough,
+  JournalPanel,
+  ProfitCalendar,
+  SmartTopUpAdvisor,
+} from "./investment-features";
+import { MarketSnapshot } from "./market-snapshot";
+import { PaperTrading } from "./paper-trading";
+import {
+  accountInstrumentDeletionConfirmation,
+  accountInstrumentDeletionSuccess,
+  type AccountInstrumentDeletionCounts,
+} from "@/lib/account-instrument-deletion";
+import { estimateFundConfirmationDate } from "@/lib/confirmation-date";
 
 type View =
   | "overview"
   | "accounts"
   | "ledger"
+  | "paper"
   | "plans"
   | "allocation"
   | "analytics"
@@ -149,6 +167,9 @@ interface PortfolioData {
     unrealized: number;
     income: number;
     returnRate: number;
+    breakEvenPrice: number;
+    toBreakEvenRate: number | null;
+    breakEvenProgress: number;
   }>;
   plans: Array<{
     id: number;
@@ -185,6 +206,21 @@ interface PortfolioData {
     alert: boolean;
   }>;
   rankings: Array<{ name: string; profit: number; returnRate: number }>;
+  journal: Array<{
+    id: number;
+    account_id: number | null;
+    instrument_id: number | null;
+    entry_date: string;
+    title: string;
+    decision: string;
+    mood: string;
+    thesis: string;
+    review_date: string;
+    review_note: string;
+    account_name: string | null;
+    instrument_name: string | null;
+    instrument_code: string | null;
+  }>;
   valuationDate: string | null;
   latestValuationDate?: string | null;
   missingPriceCount?: number;
@@ -220,6 +256,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "overview", label: "总览", icon: Home },
   { id: "accounts", label: "账户", icon: WalletCards },
   { id: "ledger", label: "交易", icon: CircleDollarSign },
+  { id: "paper", label: "模拟", icon: FlaskConical },
   { id: "plans", label: "定投", icon: CalendarDays },
   { id: "allocation", label: "配置", icon: Target },
   { id: "analytics", label: "分析", icon: BarChart3 },
@@ -265,6 +302,18 @@ const percent = (value: number | null, digits = 2) =>
   value === null || !Number.isFinite(value)
     ? "—"
     : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`;
+const holdingProfitRate = (positions: PortfolioData["holdings"]) => {
+  const cost = positions.reduce((sum, position) => sum + position.cost, 0);
+  return cost > 0
+    ? positions.reduce((sum, position) => sum + position.unrealized, 0) / cost
+    : null;
+};
+const gainLossPercent = (value: number | null) => {
+  if (value === null || !Number.isFinite(value)) return "暂无收益率";
+  if (value > 0) return `盈利 ${percent(value)}`;
+  if (value < 0) return `亏损 ${percent(value)}`;
+  return "持平 0.00%";
+};
 const dateText = (value: string | null) =>
   value ? value.replaceAll("-", ".") : "暂无估值";
 const syncTimeText = (value: string | null | undefined) => {
@@ -281,37 +330,44 @@ const syncTimeText = (value: string | null | undefined) => {
   }).format(date);
 };
 
-const addBusinessDays = (dateTextValue: string, businessDays: number) => {
-  const date = new Date(`${dateTextValue}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return "";
-  let remaining = Math.max(0, businessDays);
-  while (remaining > 0) {
-    date.setDate(date.getDate() + 1);
-    if (date.getDay() !== 0 && date.getDay() !== 6) remaining -= 1;
-  }
-  return date.toISOString().slice(0, 10);
-};
+const shanghaiTimeForInput = () =>
+  new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date());
 
 const matchingAccount = (
   accounts: PortfolioData["accounts"],
   instrument: PortfolioData["instruments"][number],
   holdings: PortfolioData["holdings"] = [],
 ) => {
-  const existingHolding = holdings.find(
-    (holding) => holding.instrumentId === instrument.id,
-  );
-  if (existingHolding) {
-    const existingAccount = accounts.find(
-      (account) => account.id === existingHolding.accountId,
+  const existingAccountIds = [
+    ...new Set(
+      holdings
+        .filter((holding) => holding.instrumentId === instrument.id)
+        .map((holding) => holding.accountId),
+    ),
+  ];
+  if (existingAccountIds.length === 1)
+    return (
+      accounts.find((account) => account.id === existingAccountIds[0]) ?? null
     );
-    if (existingAccount) return existingAccount;
-  }
   const product = `${instrument.name} ${instrument.asset_class}`;
+  if (instrument.product_type === "STOCK") {
+    const stockAccounts = accounts.filter((account) =>
+      /个股|股票|证券|A股/i.test(account.name),
+    );
+    return stockAccounts.length === 1 ? stockAccounts[0] : null;
+  }
   const exactKeywords = ["纳斯达克", "标普", "恒生", "黄金", "债券"];
   for (const keyword of exactKeywords) {
     if (product.includes(keyword)) {
-      const exact = accounts.find((account) => account.name.includes(keyword));
-      if (exact) return exact;
+      const exact = accounts.filter((account) =>
+        account.name.includes(keyword),
+      );
+      if (exact.length === 1) return exact[0];
     }
   }
   const patterns: Array<[RegExp, RegExp]> = [
@@ -323,23 +379,53 @@ const matchingAccount = (
   ];
   for (const [productPattern, accountPattern] of patterns) {
     if (productPattern.test(product)) {
-      const account = accounts.find((item) => accountPattern.test(item.name));
-      if (account) return account;
+      const candidates = accounts.filter((item) =>
+        accountPattern.test(item.name),
+      );
+      if (candidates.length === 1) return candidates[0];
     }
   }
   return null;
 };
 const productTypeLabel = (
   instrument: PortfolioData["instruments"][number] | null | undefined,
-) =>
-  instrument?.product_type === "ETF" ||
-  /^(?:5\d{5}|159\d{3})$/.test(instrument?.code ?? "")
-    ? "场内 ETF"
-    : "场外基金";
+) => {
+  if (instrument?.product_type === "STOCK") return "股票";
+  if (
+    instrument?.product_type === "ETF" ||
+    /^(?:5\d{5}|159\d{3})$/.test(instrument?.code ?? "")
+  )
+    return "场内 ETF";
+  if (instrument?.product_type === "FUND") return "场外基金";
+  return instrument?.product_type || "待匹配";
+};
+
+const instrumentCodeMatches = (
+  instrument: PortfolioData["instruments"][number],
+  codeInput: string,
+  preference: "FUND" | "STOCK",
+) => {
+  if (
+    preference === "STOCK"
+      ? instrument.product_type !== "STOCK"
+      : !["FUND", "ETF"].includes(instrument.product_type)
+  )
+    return false;
+  const code = codeInput.trim().toUpperCase();
+  const storedCode = instrument.code.toUpperCase();
+  if (storedCode === code) return true;
+  if (instrument.product_type !== "STOCK") return false;
+  const prefixed = code.match(/^(SH|SZ)(\d{6})$/);
+  const suffixed = code.match(/^(\d{6})\.(SH|SZ)$/);
+  if (prefixed) return storedCode === `${prefixed[1]}${prefixed[2]}`;
+  if (suffixed) return storedCode === `${suffixed[2]}${suffixed[1]}`;
+  return /^\d{6}$/.test(code) && storedCode.replace(/^(SH|SZ)/, "") === code;
+};
 const navTitle: Record<View, [string, string]> = {
   overview: ["投资总览", "把现金流与投资表现分开看"],
   accounts: ["投资账户", "每个策略独立核算"],
   ledger: ["交易流水", "完整记录资金与交易事件"],
+  paper: ["模拟交易", "用独立虚拟资金练习，不影响真实资产"],
   plans: ["定投计划", "按计划投入，不让节奏走样"],
   allocation: ["资产配置", "观察实际比例与目标偏离"],
   analytics: ["收益与风险", "用统一口径理解回报质量"],
@@ -437,6 +523,7 @@ export function InvestmentDashboard() {
   const [navSyncing, setNavSyncing] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const navSyncInFlight = useRef(false);
+  const mutationInFlight = useRef(false);
   const navigateView = (next: View) => {
     setView(next);
     window.history.replaceState(null, "", `#${next}`);
@@ -513,8 +600,14 @@ export function InvestmentDashboard() {
 
   const submit = async (
     payload: Record<string, unknown>,
-    success = "已保存",
+    success:
+      | string
+      | ((
+          result: PortfolioData & Partial<AccountInstrumentDeletionCounts>,
+        ) => string) = "已保存",
   ) => {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
     setBusy(true);
     setError("");
     try {
@@ -523,20 +616,20 @@ export function InvestmentDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as PortfolioData & {
-        error?: string;
-      };
+      const result = (await response.json()) as PortfolioData &
+        Partial<AccountInstrumentDeletionCounts> & { error?: string };
       if (!response.ok) throw new Error(result.error || "保存失败");
       setData(result);
       setModal(null);
       setEditingPlan(null);
-      setToast(success);
+      setToast(typeof success === "function" ? success(result) : success);
       window.setTimeout(() => setToast(""), 2600);
       return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "保存失败");
       return false;
     } finally {
+      mutationInFlight.current = false;
       setBusy(false);
     }
   };
@@ -560,13 +653,25 @@ export function InvestmentDashboard() {
         onEntry={() => setModal("entry")}
         onSync={() => void syncFunds(true, true)}
         syncing={navSyncing}
+        onNavigate={navigateView}
       />
     ) : view === "accounts" ? (
       <Accounts
         data={data}
         onAccount={() => setModal("account")}
+        busy={busy}
         onDelete={(id) =>
           void submit({ action: "deleteAccount", id }, "账户已删除")
+        }
+        onDeleteInstrument={(accountId, instrumentId) =>
+          void submit(
+            { action: "deleteAccountInstrument", accountId, instrumentId },
+            (result) =>
+              accountInstrumentDeletionSuccess({
+                deletedEntries: result.deletedEntries ?? 0,
+                deletedPlans: result.deletedPlans ?? 0,
+              }),
+          )
         }
       />
     ) : view === "ledger" ? (
@@ -578,6 +683,11 @@ export function InvestmentDashboard() {
         onDelete={(id) =>
           void submit({ action: "deleteEntry", id }, "流水已删除")
         }
+      />
+    ) : view === "paper" ? (
+      <PaperTrading
+        instruments={data.instruments}
+        onBack={() => setView("overview")}
       />
     ) : view === "plans" ? (
       <Plans
@@ -600,7 +710,7 @@ export function InvestmentDashboard() {
     ) : view === "allocation" ? (
       <Allocation data={data} submit={submit} />
     ) : view === "analytics" ? (
-      <Analytics data={data} />
+      <Analytics data={data} submit={submit} busy={busy} error={error} />
     ) : (
       <DataCenter
         data={data}
@@ -745,11 +855,13 @@ function Overview({
   onEntry,
   onSync,
   syncing,
+  onNavigate,
 }: {
   data: PortfolioData;
   onEntry: () => void;
   onSync: () => void;
   syncing: boolean;
+  onNavigate: (view: View) => void;
 }) {
   const m = data.metrics;
   const valuationRange =
@@ -789,6 +901,14 @@ function Overview({
     -monthlyAbsMax * 1.18,
     monthlyAbsMax * 1.18,
   ];
+  const activePlans = data.plans.filter((plan) => plan.status === "ACTIVE");
+  const nextPlanDate = activePlans
+    .map((plan) => plan.next_date)
+    .filter(Boolean)
+    .sort()[0] ?? null;
+  const allocationAlerts = data.allocation.filter(
+    (item) => item.alert && item.instrumentId > 0,
+  ).length;
   return (
     <div className="page-grid overview-page">
       <section className="hero-balance">
@@ -902,6 +1022,84 @@ function Overview({
           footnote="无风险利率暂按 0%"
           icon={Gauge}
         />
+      </section>
+      <MarketSnapshot
+        allocationAlerts={allocationAlerts}
+        missingPriceCount={data.missingPriceCount ?? 0}
+        activePlanCount={activePlans.length}
+        nextPlanDate={nextPlanDate}
+        onNavigate={onNavigate}
+      />
+      <section className="panel feature-toolbox-panel">
+        <div className="feature-toolbox-head">
+          <div>
+            <span>NEW · 投资工具箱</span>
+            <h2>新功能都在这里</h2>
+            <p>直接进入对应工具，不用再到各个页面里寻找。</p>
+          </div>
+          <FlaskConical size={24} />
+        </div>
+        <div className="feature-toolbox-grid">
+          {[
+            {
+              title: "模拟交易",
+              text: "虚拟资金练习买卖，与真实资产隔离",
+              view: "paper" as View,
+              icon: FlaskConical,
+              tone: "purple",
+            },
+            {
+              title: "回本进度",
+              text: "查看回本净值和还需上涨多少",
+              view: "accounts" as View,
+              icon: Gauge,
+              tone: "green",
+            },
+            {
+              title: "定投模拟",
+              text: "历史回测与 1–30 年长期测算",
+              view: "plans" as View,
+              icon: CalendarDays,
+              tone: "blue",
+            },
+            {
+              title: "智能补仓",
+              text: "按目标配置分配下一笔投入",
+              view: "allocation" as View,
+              icon: Target,
+              tone: "amber",
+            },
+            {
+              title: "盈亏与持仓穿透",
+              text: "盈亏日历、重复持仓和底层公司",
+              view: "analytics" as View,
+              icon: Layers3,
+              tone: "indigo",
+            },
+            {
+              title: "投资复盘",
+              text: "按产品代码记录判断和后续结果",
+              view: "analytics" as View,
+              icon: BookOpen,
+              tone: "rose",
+            },
+          ].map(({ title, text, view: nextView, icon: Icon, tone }) => (
+            <button
+              className={`feature-tool-card ${tone}`}
+              key={title}
+              onClick={() => onNavigate(nextView)}
+            >
+              <span>
+                <Icon size={19} />
+              </span>
+              <div>
+                <strong>{title}</strong>
+                <small>{text}</small>
+              </div>
+              <ChevronRight size={17} />
+            </button>
+          ))}
+        </div>
       </section>
       <section className="panel asset-chart-panel">
         <PanelTitle
@@ -1019,8 +1217,17 @@ function Overview({
                 <strong>¥{money(account.assets)}</strong>
                 <span className={account.profit >= 0 ? "up" : "down"}>
                   累计收益 {account.profit >= 0 ? "+" : ""}¥
-                  {money(account.profit)} · 年化 XIRR{" "}
-                  {percent(account.returnRate)}
+                  {money(account.profit)}
+                </span>
+                <span className="account-rate-detail">
+                  持仓盈亏率{" "}
+                  {percent(
+                    holdingProfitRate(
+                      data.holdings.filter(
+                        (position) => position.accountId === account.id,
+                      ),
+                    ),
+                  )}
                 </span>
               </div>
             </div>
@@ -1113,10 +1320,14 @@ function Accounts({
   data,
   onAccount,
   onDelete,
+  onDeleteInstrument,
+  busy,
 }: {
   data: PortfolioData;
   onAccount: () => void;
   onDelete: (id: number) => void;
+  onDeleteInstrument: (accountId: number, instrumentId: number) => void;
+  busy: boolean;
 }) {
   const [filter, setFilter] = useState<"ALL" | "PROFIT" | "LOSS">("ALL");
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -1175,6 +1386,10 @@ function Accounts({
           const positions = data.holdings.filter(
             (item) => item.accountId === account.id,
           );
+          const accountHoldingRate = holdingProfitRate(positions);
+          const statusValue = positions.length
+            ? (accountHoldingRate ?? 0)
+            : account.profit;
           const primaryPosition = positions.length === 1 ? positions[0] : null;
           const primaryInstrument = primaryPosition
             ? data.instruments.find(
@@ -1190,18 +1405,20 @@ function Accounts({
                 <div className="account-card-actions">
                   <span
                     className={`account-profit-status ${
-                      account.profit > 0
+                      statusValue > 0
                         ? "profit"
-                        : account.profit < 0
+                        : statusValue < 0
                           ? "loss"
                           : "flat"
                     }`}
                   >
-                    {account.profit > 0
-                      ? "盈利"
-                      : account.profit < 0
-                        ? "亏损"
-                        : "持平"}
+                    {positions.length
+                      ? gainLossPercent(accountHoldingRate)
+                      : account.profit > 0
+                        ? "累计盈利"
+                        : account.profit < 0
+                          ? "累计亏损"
+                          : "持平"}
                   </span>
                   <button
                     aria-label={
@@ -1252,6 +1469,12 @@ function Accounts({
                   </b>
                 </div>
                 <div>
+                  <span>持仓盈亏率</span>
+                  <b className={(accountHoldingRate ?? 0) >= 0 ? "up" : "down"}>
+                    {percent(accountHoldingRate)}
+                  </b>
+                </div>
+                <div>
                   <span>年化 XIRR</span>
                   <b className={(account.returnRate ?? 0) >= 0 ? "up" : "down"}>
                     {percent(account.returnRate)}
@@ -1261,13 +1484,92 @@ function Accounts({
               <div className="mini-holdings">
                 {positions.length ? (
                   positions.map((position) => (
-                    <div key={position.instrumentId}>
-                      <span>
-                        {primaryPosition
-                          ? `${position.code} · 当前持仓`
-                          : position.instrumentName}
-                      </span>
-                      <b>{position.quantity.toFixed(2)} 份</b>
+                    <div
+                      className="mini-holding-block"
+                      key={position.instrumentId}
+                    >
+                      <div className="mini-holding-main">
+                        <span>
+                          {primaryPosition
+                            ? `${position.code} · ${position.quantity.toFixed(2)} 份`
+                            : `${position.instrumentName} · ${position.quantity.toFixed(2)} 份`}
+                        </span>
+                        <span className="mini-holding-result">
+                          <b
+                            className={position.unrealized >= 0 ? "up" : "down"}
+                          >
+                            {position.unrealized >= 0 ? "+" : ""}¥
+                            {money(position.unrealized)}
+                          </b>
+                          <em
+                            className={position.returnRate >= 0 ? "up" : "down"}
+                          >
+                            {gainLossPercent(position.returnRate)}
+                          </em>
+                        </span>
+                      </div>
+                      <div className="break-even-status">
+                        <div>
+                          <span>
+                            {position.toBreakEvenRate !== null &&
+                            position.toBreakEvenRate > 0
+                              ? `回本进度 ${(position.breakEvenProgress * 100).toFixed(1)}%`
+                              : "已越过回本线"}
+                          </span>
+                          <strong>
+                            回本净值 {position.breakEvenPrice.toFixed(4)}
+                          </strong>
+                        </div>
+                        <div className="break-even-track">
+                          <span
+                            className={
+                              position.toBreakEvenRate !== null &&
+                              position.toBreakEvenRate > 0
+                                ? "recovering"
+                                : "recovered"
+                            }
+                            style={{
+                              width: `${Math.max(2, position.breakEvenProgress * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <small
+                          className={
+                            position.toBreakEvenRate !== null &&
+                            position.toBreakEvenRate > 0
+                              ? "down"
+                              : "up"
+                          }
+                        >
+                          {position.toBreakEvenRate === null
+                            ? "当前缺少有效净值"
+                            : position.toBreakEvenRate > 0
+                              ? `当前净值还需上涨 ${(position.toBreakEvenRate * 100).toFixed(2)}% 回本`
+                              : `当前价格高于回本线 ${Math.abs(position.toBreakEvenRate * 100).toFixed(2)}%`}
+                        </small>
+                      </div>
+                      <button
+                        type="button"
+                        className="delete-holding-button"
+                        disabled={busy}
+                        onClick={() => {
+                          if (
+                            confirm(
+                              accountInstrumentDeletionConfirmation(
+                                account.name,
+                                position.instrumentName,
+                              ),
+                            )
+                          )
+                            onDeleteInstrument(
+                              account.id,
+                              position.instrumentId,
+                            );
+                        }}
+                      >
+                        <Trash2 size={15} />
+                        删除该产品
+                      </button>
                     </div>
                   ))
                 ) : (
@@ -1674,6 +1976,7 @@ function Plans({
           <span>设置金额、产品与执行日</span>
         </button>
       </div>
+      <DcaSimulator instruments={data.instruments} />
     </div>
   );
 }
@@ -1686,16 +1989,248 @@ function Allocation({
   submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
 }) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
-  const totalTarget = data.instruments.reduce(
-    (sum, item) =>
-      sum +
-      Number(
-        drafts[item.id] ??
-          (data.targets.find((target) => target.instrument_id === item.id)
-            ?.target_bps ?? 0) / 100,
-      ),
+  const [showLegacyTargets, setShowLegacyTargets] = useState(false);
+  const [showOtherProducts, setShowOtherProducts] = useState(false);
+  const [draftNotice, setDraftNotice] = useState("");
+  const allocationSummary = data.allocation.reduce<PortfolioData["allocation"]>(
+    (items, item) => {
+      const existing = items.find(
+        (current) => current.instrumentId === item.instrumentId,
+      );
+      if (existing) {
+        existing.value += item.value;
+        existing.actual += item.actual;
+        existing.drift = existing.actual - existing.target;
+        existing.alert = existing.alert || item.alert;
+      } else {
+        items.push({ ...item });
+      }
+      return items;
+    },
+    [],
+  );
+  const rawTargetPercent = (instrumentId: number) => {
+    const saved = data.targets.find(
+      (target) => target.instrument_id === instrumentId,
+    );
+    return Number(drafts[instrumentId] ?? (saved?.target_bps ?? 0) / 100);
+  };
+  const targetBps = (instrumentId: number) => {
+    const value = rawTargetPercent(instrumentId);
+    return Number.isFinite(value) ? Math.round(value * 100) : 0;
+  };
+  const targetRows = data.instruments.map((instrument, index) => {
+    const current = allocationSummary.find(
+      (item) => item.instrumentId === instrument.id,
+    );
+    const savedTarget =
+      (data.targets.find((target) => target.instrument_id === instrument.id)
+        ?.target_bps ?? 0) / 100;
+    return {
+      instrument,
+      index,
+      current,
+      currentValue: current?.value ?? 0,
+      currentPercent: (current?.actual ?? 0) * 100,
+      savedTarget,
+      rawTarget: rawTargetPercent(instrument.id),
+      targetBps: targetBps(instrument.id),
+      target: targetBps(instrument.id) / 100,
+    };
+  });
+  const heldRows = targetRows.filter((row) => row.currentValue > 0);
+  const legacyRows = targetRows.filter(
+    (row) => row.currentValue <= 0 && row.savedTarget > 0,
+  );
+  const otherRows = targetRows.filter(
+    (row) => row.currentValue <= 0 && row.savedTarget <= 0,
+  );
+  const productTargetBps = targetRows.reduce(
+    (sum, row) => sum + row.targetBps,
     0,
   );
+  const productTarget = productTargetBps / 100;
+  const cashTargetBps = Math.max(0, 10_000 - productTargetBps);
+  const cashTarget = cashTargetBps / 100;
+  const currentCashValue = Math.max(0, data.metrics.cash);
+  const currentCashPercent =
+    data.metrics.totalAssets > 0
+      ? (currentCashValue / data.metrics.totalAssets) * 100
+      : 0;
+  const cashGap = cashTarget - currentCashPercent;
+  const cashGapAmount =
+    Math.abs(cashGap / 100) * Math.max(0, data.metrics.totalAssets);
+  const targetValuesValid = targetRows.every(
+    (row) =>
+      Number.isFinite(row.rawTarget) &&
+      row.rawTarget >= 0 &&
+      row.rawTarget <= 100,
+  );
+  const targetTotalIsValid = targetValuesValid && productTargetBps <= 10_000;
+  const unheldTargetRows = targetRows.filter(
+    (row) => row.currentValue <= 0 && row.targetBps > 0,
+  );
+  const targetStatusIsReady =
+    targetTotalIsValid && unheldTargetRows.length === 0;
+  const heldMarketValue = heldRows.reduce(
+    (sum, row) => sum + row.currentValue,
+    0,
+  );
+  const legacyTargetTotal = legacyRows.reduce(
+    (sum, row) => sum + row.savedTarget,
+    0,
+  );
+  const heldWithoutSavedTarget = heldRows.filter((row) => row.savedTarget <= 0);
+
+  const useCurrentHoldingsAsDraft = () => {
+    if (heldRows.length === 0 || heldMarketValue <= 0) return;
+    if (
+      !confirm(
+        "按当前持仓生成目标比例草稿？\n\n目前没有持有的旧目标会被设为 0。这里只生成草稿，不会自动保存，也不会发生任何买卖。",
+      )
+    )
+      return;
+
+    const nextDrafts: Record<number, string> = {};
+    const desiredCashBps = Math.min(
+      10_000,
+      Math.max(
+        0,
+        Math.round((currentCashValue / data.metrics.totalAssets) * 10_000),
+      ),
+    );
+    const productBudgetBps = 10_000 - desiredCashBps;
+    let assignedBps = 0;
+    heldRows.forEach((row, index) => {
+      const isLast = index === heldRows.length - 1;
+      const valueBps = isLast
+        ? Math.max(0, productBudgetBps - assignedBps)
+        : Math.min(
+            Math.max(0, productBudgetBps - assignedBps),
+            Math.round((row.currentValue / heldMarketValue) * 10_000),
+          );
+      assignedBps += valueBps;
+      nextDrafts[row.instrument.id] = (valueBps / 100).toFixed(2);
+    });
+    targetRows.forEach((row) => {
+      if (row.currentValue <= 0) nextDrafts[row.instrument.id] = "0";
+    });
+    setDrafts(nextDrafts);
+    setShowLegacyTargets(true);
+    setDraftNotice(
+      `已按当前资产生成草稿，并保留 ${(desiredCashBps / 100).toFixed(
+        2,
+      )}% 现金目标。未持有的旧目标已设为 0，请检查后保存。`,
+    );
+  };
+
+  const saveAllTargets = async () => {
+    if (!targetTotalIsValid) {
+      setDraftNotice(
+        "每个产品目标必须在 0% 到 100% 之间，产品目标合计不能超过 100%。",
+      );
+      return;
+    }
+    const saved = await submit(
+      {
+        action: "updateTargets",
+        targets: [
+          { instrumentId: 0, targetPercent: cashTargetBps / 100 },
+          ...targetRows.map((row) => ({
+            instrumentId: row.instrument.id,
+            targetPercent: row.targetBps / 100,
+          })),
+        ],
+      },
+      "全部目标比例已保存",
+    );
+    if (saved) {
+      setDrafts({});
+      setDraftNotice("");
+    }
+  };
+
+  const renderTargetRow = (row: (typeof targetRows)[number]) => {
+    const { instrument, index, currentValue, currentPercent, target } = row;
+    const gap = target - currentPercent;
+    const approximateAmount =
+      Math.abs(gap / 100) * Math.max(0, data.metrics.totalAssets);
+    const color = COLORS[index % COLORS.length];
+    return (
+      <div className="target-row target-row-plain" key={instrument.id}>
+        <div className="target-name">
+          <i style={{ background: color }} />
+          <div>
+            <strong>{instrument.name}</strong>
+            <span>{instrument.code}</span>
+          </div>
+        </div>
+        <div className="target-current-value">
+          <span>现在持有</span>
+          <strong>¥{money(currentValue)}</strong>
+          <small>占总资产 {currentPercent.toFixed(1)}%</small>
+        </div>
+        <label className="target-input-label">
+          <span>我希望占</span>
+          <div>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.01"
+              inputMode="decimal"
+              aria-label={`${instrument.name}目标占比`}
+              value={drafts[instrument.id] ?? target}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (!/^\d{0,3}(?:\.\d{0,2})?$/.test(value)) return;
+                setDrafts((currentDrafts) => ({
+                  ...currentDrafts,
+                  [instrument.id]: value,
+                }));
+                setDraftNotice("目标比例尚未保存，请检查合计后保存。");
+              }}
+              onBlur={(event) => {
+                if (event.target.value === "") return;
+                const value = Number(event.target.value);
+                if (!Number.isFinite(value)) return;
+                setDrafts((currentDrafts) => ({
+                  ...currentDrafts,
+                  [instrument.id]: String(Math.round(value * 100) / 100),
+                }));
+              }}
+            />
+            <b>%</b>
+          </div>
+        </label>
+        <div
+          className={`target-gap ${
+            Math.abs(gap) <= 0.05
+              ? "is-balanced"
+              : gap > 0
+                ? "is-under"
+                : "is-over"
+          }`}
+        >
+          <strong>
+            {Math.abs(gap) <= 0.05
+              ? "已达到目标"
+              : gap > 0
+                ? `还差 ${gap.toFixed(1)}%`
+                : `超出 ${Math.abs(gap).toFixed(1)}%`}
+          </strong>
+          <span>
+            {Math.abs(gap) <= 0.05
+              ? "当前比例与目标一致"
+              : gap > 0
+                ? `按当前总资产折算，约需买入 ¥${money(approximateAmount)}`
+                : `按当前总资产折算，若调仓约需减少 ¥${money(approximateAmount)}`}
+          </span>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="allocation-page">
       <section className="panel allocation-hero">
@@ -1703,15 +2238,18 @@ function Allocation({
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={data.allocation}
+                data={allocationSummary}
                 dataKey="value"
                 innerRadius="67%"
                 outerRadius="88%"
                 paddingAngle={3}
                 stroke="none"
               >
-                {data.allocation.map((_, i) => (
-                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                {allocationSummary.map((item, i) => (
+                  <Cell
+                    key={item.instrumentId}
+                    fill={COLORS[i % COLORS.length]}
+                  />
                 ))}
               </Pie>
             </PieChart>
@@ -1721,139 +2259,205 @@ function Allocation({
             <strong>¥{compactMoney(data.metrics.totalAssets)}</strong>
           </div>
         </div>
-        <div>
-          <span className="eyebrow">当前资产配置</span>
-          <h2>
-            {data.allocation.filter((item) => item.alert).length
-              ? "配置需要关注"
-              : "配置处于目标区间"}
-          </h2>
+        <div className="allocation-hero-copy">
+          <span className="eyebrow">当前持仓分布（按市值）</span>
+          <h2>你的资产现在分别放在哪里</h2>
           <p>
-            当实际比例偏离目标超过 5
-            个百分点，系统会发出提示。现金作为独立资产计入总资产。
+            这里显示的是你现在实际持有的资产，不是目标。占比等于该产品当前市值除以总资产，现金也会单独计算。
           </p>
           <div className="allocation-summary-list">
-            {data.allocation.map((item, index) => (
-              <div key={item.name}>
+            {allocationSummary.map((item, index) => (
+              <div key={item.instrumentId}>
                 <i style={{ background: COLORS[index % COLORS.length] }} />
-                <span>{item.name}</span>
-                <strong>{(item.actual * 100).toFixed(1)}%</strong>
+                <span>
+                  <strong>{item.name}</strong>
+                  <small>¥{money(item.value)}</small>
+                </span>
+                <b>{(item.actual * 100).toFixed(1)}%</b>
               </div>
             ))}
           </div>
         </div>
       </section>
-      <section className="panel">
-        <div className="panel-title-row">
-          <PanelTitle
-            title="目标与偏离"
-            subtitle="目标合计应为 100%"
-            action={`当前合计 ${totalTarget.toFixed(0)}%`}
-          />
+      <section className="panel allocation-target-panel">
+        <div className="allocation-target-head">
+          <div>
+            <span className="eyebrow">我的配置目标</span>
+            <h2>设置你希望每个产品占多大比例</h2>
+            <p>
+              例如填写 20%，表示你希望这个产品约占总资产的
+              20%。修改目标只用于计算和提醒，不会自动买卖。
+            </p>
+          </div>
           <button
-            className="secondary-button"
-            disabled={Math.abs(totalTarget - 100) > 0.01}
-            onClick={() =>
-              void submit(
-                {
-                  action: "updateTargets",
-                  targets: data.instruments.map((instrument) => ({
-                    instrumentId: instrument.id,
-                    targetPercent: Number(
-                      drafts[instrument.id] ??
-                        (data.targets.find(
-                          (target) => target.instrument_id === instrument.id,
-                        )?.target_bps ?? 0) / 100,
-                    ),
-                  })),
-                },
-                "全部配置目标已保存",
-              )
-            }
+            type="button"
+            className="secondary-button current-as-target-button"
+            disabled={heldRows.length === 0}
+            onClick={useCurrentHoldingsAsDraft}
           >
-            <Check size={16} />
-            保存全部
+            按当前持仓生成目标草稿
           </button>
         </div>
-        <div className="target-list">
-          {data.instruments.map((instrument, index) => {
-            const current = data.allocation.find(
-              (item) => item.instrumentId === instrument.id,
-            );
-            const saved = data.targets.find(
-              (item) => item.instrument_id === instrument.id,
-            );
-            const target = Number(
-              drafts[instrument.id] ?? (saved?.target_bps ?? 0) / 100,
-            );
-            const drift = (current?.actual ?? 0) * 100 - target;
-            return (
-              <div className="target-row" key={instrument.id}>
-                <div className="target-name">
-                  <i style={{ background: COLORS[index % COLORS.length] }} />
-                  <div>
-                    <strong>{instrument.name}</strong>
-                    <span>
-                      {instrument.code} · 当前{" "}
-                      {((current?.actual ?? 0) * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                </div>
-                <div className="target-bar">
-                  <div>
-                    <span
-                      style={{
-                        width: `${Math.min(100, (current?.actual ?? 0) * 100)}%`,
-                        background: COLORS[index % COLORS.length],
-                      }}
-                    />
-                    <i style={{ left: `${Math.min(100, target)}%` }} />
-                  </div>
-                  <small className={Math.abs(drift) > 5 ? "warning-text" : ""}>
-                    {drift >= 0 ? "+" : ""}
-                    {drift.toFixed(1)} 个百分点
-                  </small>
-                </div>
-                <label>
-                  目标
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    value={target}
-                    onChange={(e) =>
-                      setDrafts({ ...drafts, [instrument.id]: e.target.value })
-                    }
-                  />
-                  %
-                </label>
-                <button
-                  className="icon-button"
-                  aria-label="保存目标"
-                  onClick={() =>
-                    void submit(
-                      {
-                        action: "updateTarget",
-                        instrumentId: instrument.id,
-                        targetPercent: target,
-                        alertPercent: 5,
-                      },
-                      "配置目标已更新",
-                    )
-                  }
-                >
-                  <Check size={17} />
-                </button>
-              </div>
-            );
-          })}
+        {legacyRows.length > 0 && heldWithoutSavedTarget.length > 0 && (
+          <div className="target-diagnosis" role="note">
+            <AlertTriangle size={20} />
+            <div>
+              <strong>已找到“全部偏离”的原因</strong>
+              <span>
+                有 {legacyRows.length} 个目标设在目前没持有的产品上，同时有{" "}
+                {heldWithoutSavedTarget.length}
+                个真实持仓还没有目标，所以系统会全部提示偏离。请把旧目标改为
+                0，再给真实持仓填写目标；也可以使用右上角按钮先生成草稿。
+              </span>
+            </div>
+          </div>
+        )}
+        <div className="cash-target-card" role="note">
+          <div className="cash-target-name">
+            <span style={{ background: "#8995ad" }} />
+            <div>
+              <strong>现金 / 待配置资金</strong>
+              <span>不会被当作基金买入</span>
+            </div>
+          </div>
+          <div className="cash-target-readonly">
+            <span>当前现金</span>
+            <strong>¥{money(currentCashValue)}</strong>
+            <small>{currentCashPercent.toFixed(1)}%</small>
+          </div>
+          <div className="cash-target-readonly">
+            <span>自动目标</span>
+            <strong>{cashTarget.toFixed(1)}%</strong>
+            <small>
+              {Math.abs(cashGap) <= 0.05
+                ? "已达到"
+                : cashGap > 0
+                  ? `还需保留约 ¥${money(cashGapAmount)}`
+                  : `超出约 ¥${money(cashGapAmount)}`}
+            </small>
+          </div>
         </div>
+        <div
+          className={`target-total-status ${targetStatusIsReady ? "is-ready" : "is-incomplete"}`}
+          role="status"
+        >
+          <div>
+            <strong>
+              产品 {productTarget.toFixed(1)}% + 现金 {cashTarget.toFixed(1)}% = 100%
+            </strong>
+            <span>
+              {!targetValuesValid
+                ? "每项比例必须在 0% 到 100% 之间"
+                : targetTotalIsValid
+                  ? unheldTargetRows.length > 0
+                    ? `剩余比例已自动作为现金目标，可以保存；其中 ${unheldTargetRows.length} 项产品目前未持有，请确认是否仍计划购买`
+                    : "剩余比例已自动作为现金/待配置资金，现在可以保存"
+                  : `产品目标已超出 ${(productTarget - 100).toFixed(1)}%，请调低部分目标`}
+            </span>
+          </div>
+          <button
+            className="primary-button save-all-targets"
+            disabled={!targetTotalIsValid}
+            onClick={() => void saveAllTargets()}
+          >
+            <Check size={16} />
+            保存全部目标比例
+          </button>
+        </div>
+        {draftNotice && <p className="target-draft-notice">{draftNotice}</p>}
+        <div className="target-section-label">
+          <div>
+            <strong>你现在持有的产品</strong>
+            <span>先看实际金额，再填写希望达到的比例</span>
+          </div>
+          <b>{heldRows.length} 项持仓</b>
+        </div>
+        <div className="target-list">
+          {heldRows.length ? (
+            heldRows.map(renderTargetRow)
+          ) : (
+            <div className="target-empty-state">当前还没有持仓。</div>
+          )}
+        </div>
+        {legacyRows.length > 0 && (
+          <div className="target-fold-group legacy-target-group">
+            <button
+              type="button"
+              className="target-fold-toggle"
+              aria-expanded={showLegacyTargets}
+              aria-controls="legacy-target-list"
+              onClick={() => setShowLegacyTargets(!showLegacyTargets)}
+            >
+              <span>
+                <strong>旧目标（目前没有持有）</strong>
+                <small>
+                  {legacyRows.length} 项，占用目标合计{" "}
+                  {legacyTargetTotal.toFixed(1)}% ；如不再计划购买，请改为 0
+                </small>
+              </span>
+              <b>{showLegacyTargets ? "收起" : "查看并处理"}</b>
+            </button>
+            {showLegacyTargets && (
+              <div
+                className="target-list target-fold-content"
+                id="legacy-target-list"
+              >
+                {legacyRows.map(renderTargetRow)}
+              </div>
+            )}
+          </div>
+        )}
+        {otherRows.length > 0 && (
+          <div className="target-fold-group other-target-group">
+            <button
+              type="button"
+              className="target-fold-toggle"
+              aria-expanded={showOtherProducts}
+              aria-controls="other-target-list"
+              onClick={() => setShowOtherProducts(!showOtherProducts)}
+            >
+              <span>
+                <strong>其他产品</strong>
+                <small>当前没持有，也没有设置目标，默认隐藏</small>
+              </span>
+              <b>
+                {showOtherProducts
+                  ? "收起"
+                  : `显示其他产品（${otherRows.length}）`}
+              </b>
+            </button>
+            {showOtherProducts && (
+              <div
+                className="target-list target-fold-content"
+                id="other-target-list"
+              >
+                {otherRows.map(renderTargetRow)}
+              </div>
+            )}
+          </div>
+        )}
       </section>
+      <SmartTopUpAdvisor
+        instruments={data.instruments}
+        holdings={data.holdings}
+        targets={data.targets}
+        cashValue={data.metrics.cash ?? 0}
+      />
     </div>
   );
 }
 
-function Analytics({ data }: { data: PortfolioData }) {
+function Analytics({
+  data,
+  submit,
+  busy,
+  error,
+}: {
+  data: PortfolioData;
+  submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
+  busy: boolean;
+  error: string;
+}) {
   const [news, setNews] = useState<MarketNewsFeed | null>(null);
   const [newsLoading, setNewsLoading] = useState(true);
   const loadNews = async (force = false) => {
@@ -2044,9 +2648,18 @@ function Analytics({ data }: { data: PortfolioData }) {
           </ResponsiveContainer>
         </div>
       </section>
+      <ProfitCalendar series={data.series} />
+      <FundLookthrough
+        instruments={data.instruments}
+        holdings={data.holdings}
+        totalAssets={data.metrics.totalAssets}
+      />
       <div className="analytics-lower">
         <section className="panel">
-          <PanelTitle title="产品收益排名" subtitle="实现 + 未实现 + 分红" />
+          <PanelTitle
+            title="各基金盈亏百分点"
+            subtitle="左侧为累计盈亏金额，右侧为当前持仓收益率"
+          />
           <div className="ranking-list">
             {data.rankings.map((item, index) => (
               <div key={item.name}>
@@ -2057,7 +2670,12 @@ function Analytics({ data }: { data: PortfolioData }) {
                     {item.profit >= 0 ? "+" : ""}¥{money(item.profit)}
                   </span>
                 </div>
-                <strong className={item.returnRate >= 0 ? "up" : "down"}>
+                <strong
+                  className={`ranking-return ${item.returnRate >= 0 ? "up" : "down"}`}
+                >
+                  <small>
+                    {item.returnRate >= 0 ? "持仓盈利" : "持仓亏损"}
+                  </small>
                   {percent(item.returnRate)}
                 </strong>
               </div>
@@ -2101,6 +2719,14 @@ function Analytics({ data }: { data: PortfolioData }) {
           </div>
         </section>
       </div>
+      <JournalPanel
+        entries={data.journal}
+        accounts={data.accounts}
+        instruments={data.instruments}
+        busy={busy}
+        error={error}
+        submit={submit}
+      />
     </div>
   );
 }
@@ -2118,6 +2744,7 @@ function DataCenter({
   onInstrument: () => void;
   submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
 }) {
+  const [exporting, setExporting] = useState(false);
   const downloadTemplate = () => {
     const content =
       "账户名称,交易类型,交易日期,确认日期,产品代码,成交份额,成交价格,成交金额,手续费,税费,备注,外部流水号\n纳斯达克100ETF,BUY,2026-07-18,2026-07-21,513100,100,2.846,284.6,0.1,0,示例交易,REF-001";
@@ -2131,16 +2758,36 @@ function DataCenter({
     link.click();
     URL.revokeObjectURL(url);
   };
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `盈迹数据备份-${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const response = await fetch("/api/paper-trading", {
+        cache: "no-store",
+      });
+      const paperTrading = (await response.json()) as Record<string, unknown>;
+      if (!response.ok)
+        throw new Error(String(paperTrading.error || "模拟账本读取失败"));
+      const backup = {
+        format: "YINGJI_COMPLETE_BACKUP",
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        portfolio: data,
+        paperTrading,
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `盈迹完整备份-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      alert(caught instanceof Error ? caught.message : "完整备份导出失败");
+    } finally {
+      setExporting(false);
+    }
   };
   return (
     <div className="data-page">
@@ -2195,10 +2842,14 @@ function DataCenter({
         </div>
         <div>
           <h2>完整数据备份</h2>
-          <p>导出当前计算结果、账户、流水、计划和配置为 JSON 文件。</p>
-          <button className="secondary-button" onClick={exportData}>
+          <p>导出真实账户、流水、计划、复盘和独立模拟账本为 JSON 文件。</p>
+          <button
+            className="secondary-button"
+            disabled={exporting}
+            onClick={() => void exportData()}
+          >
             <Download size={17} />
-            导出备份
+            {exporting ? "正在整理…" : "导出完整备份"}
           </button>
         </div>
       </section>
@@ -2292,6 +2943,20 @@ function DataCenter({
               >
                 <RefreshCcw size={15} />
                 同步数据
+              </button>
+              <button
+                className="text-danger"
+                style={{ marginLeft: 8 }}
+                onClick={() => {
+                  if (confirm("确认删除产品 " + instrument.name + "？有买卖交易的不可删除。"))
+                    void submit(
+                      { action: "deleteInstrument", instrumentId: instrument.id },
+                      instrument.name + " 已删除",
+                    );
+                }}
+              >
+                <Trash2 size={15} />
+                删除
               </button>
             </div>
           ))}
@@ -2513,8 +3178,14 @@ function ModalForm({
         ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
         : (data.instruments[0]?.id ?? ""),
     ),
-    instrumentCode: data.instruments[0]?.code ?? "",
+    instrumentCode:
+      type === "plan"
+        ? (initialPlanInstrument?.code ?? "")
+        : (data.instruments[0]?.code ?? ""),
+    preferredProductType:
+      initialPlanInstrument?.product_type === "STOCK" ? "STOCK" : "FUND",
     tradeDate: today,
+    tradeTime: shanghaiTimeForInput(),
     confirmationDate: "",
     priceDate: today,
     nextDate: editingPlan?.next_date ?? today,
@@ -2556,6 +3227,7 @@ function ModalForm({
   const [confirmationIsAuto, setConfirmationIsAuto] = useState(true);
   const [priceIsAuto, setPriceIsAuto] = useState(true);
   const [amountIsAuto, setAmountIsAuto] = useState(true);
+  const [quantityIsAuto, setQuantityIsAuto] = useState(true);
   const [feeIsAuto, setFeeIsAuto] = useState(true);
   const [resolvedInstrument, setResolvedInstrument] = useState<
     PortfolioData["instruments"][number] | null
@@ -2569,39 +3241,46 @@ function ModalForm({
     if (type !== "entry" || !["BUY", "SELL", "DIVIDEND"].includes(form.kind))
       return;
     const code = (form.instrumentCode ?? "").trim().toUpperCase();
-    const existing = data.instruments.find(
-      (item) => item.code.toUpperCase() === code,
+    const preferredProductType =
+      form.preferredProductType === "STOCK" ? "STOCK" : "FUND";
+    const existing = data.instruments.find((item) =>
+      instrumentCodeMatches(item, code, preferredProductType),
     );
+    const isCompleteCode =
+      preferredProductType === "FUND"
+        ? /^\d{6}$/.test(code)
+        : /^(?:(?:SH|SZ)?\d{6}|\d{6}\.(?:SH|SZ))$/.test(code);
     const controller = new AbortController();
     const timer = window.setTimeout(
       async () => {
-        if (existing && !["FUND", "ETF"].includes(existing.product_type)) {
-          setResolvedInstrument(null);
-          setQuoteMeta(null);
-          setFundCategory("");
-          setConfirmationBusinessDays(null);
-          setLookupNote(`已匹配：${existing.name} · ${existing.asset_class}`);
-          return;
-        }
         setResolvedInstrument(null);
-        if (!/^\d{6}$/.test(code)) {
+        if (!isCompleteCode) {
           setQuoteMeta(null);
           setFundCategory("");
           setConfirmationBusinessDays(null);
-          setLookupNote(code ? "请输入完整的 6 位基金或 ETF 代码" : "");
+          setLookupNote(
+            code
+              ? preferredProductType === "STOCK"
+                ? "自动行情目前支持沪深 A 股，例如 600519 或 SZ000001"
+                : "请输入完整的 6 位基金或 ETF 代码"
+              : "",
+          );
           return;
         }
         setPriceIsAuto(true);
         setLookupBusy(true);
-        setLookupNote(`正在匹配基金资料及 ${form.tradeDate} 对应净值…`);
+        setLookupNote(
+          `正在匹配${preferredProductType === "STOCK" ? "股票资料和价格" : `基金资料及 ${form.tradeDate} 对应净值`}…`,
+        );
         try {
           const response = await fetch("/api/portfolio", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              action: "resolveInstrument",
+              action: "lookupInstrument",
               code,
               tradeDate: form.tradeDate,
+              preferredProductType,
             }),
             signal: controller.signal,
           });
@@ -2647,7 +3326,10 @@ function ModalForm({
             current.instrumentCode === code
               ? {
                   ...current,
-                  instrumentId: String(result.instrument?.id ?? ""),
+                  instrumentId:
+                    Number(result.instrument?.id ?? 0) > 0
+                      ? String(result.instrument?.id)
+                      : "",
                   accountId:
                     current.kind === "BUY" && account
                       ? String(account.id)
@@ -2664,7 +3346,7 @@ function ModalForm({
               : current,
           );
           setLookupNote(
-            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : `；${form.tradeDate} 之前暂无公开净值`}${account ? `；账户已匹配为 ${account.name}` : ""}`,
+            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : `；${form.tradeDate} 之前暂无公开净值`}${account ? (form.kind === "BUY" ? `；保存买入后将把账户“${account.name}”改为正式产品名称` : `；账户已匹配为 ${account.name}`) : ""}`,
           );
         } catch (caught) {
           if (!controller.signal.aborted)
@@ -2675,7 +3357,7 @@ function ModalForm({
           if (!controller.signal.aborted) setLookupBusy(false);
         }
       },
-      !/^\d{6}$/.test(code) ? 0 : existing ? 120 : 450,
+      !isCompleteCode ? 0 : existing ? 120 : 450,
     );
     return () => {
       window.clearTimeout(timer);
@@ -2687,7 +3369,154 @@ function ModalForm({
     data.instruments,
     form.instrumentCode,
     form.kind,
+    form.preferredProductType,
     form.tradeDate,
+    type,
+  ]);
+  useEffect(() => {
+    if (type !== "plan") return;
+    const code = (form.instrumentCode ?? "").trim().toUpperCase();
+    const preferredProductType =
+      form.preferredProductType === "STOCK" ? "STOCK" : "FUND";
+    const isCompleteCode =
+      preferredProductType === "FUND"
+        ? /^\d{6}$/.test(code)
+        : /^(?:(?:SH|SZ)?\d{6}|\d{6}\.(?:SH|SZ))$/.test(code);
+    const existing = data.instruments.find((item) =>
+      instrumentCodeMatches(item, code, preferredProductType),
+    );
+    const controller = new AbortController();
+    const timer = window.setTimeout(
+      async () => {
+        if (!code) {
+          setLookupBusy(false);
+          setLookupNote("");
+          setResolvedInstrument(null);
+          return;
+        }
+        if (existing) {
+          const account = matchingAccount(
+            data.accounts,
+            existing,
+            data.holdings,
+          );
+          setLookupBusy(false);
+          setResolvedInstrument(existing);
+          setFundCategory("");
+          setForm((current) =>
+            current.instrumentCode === code &&
+            current.preferredProductType === preferredProductType
+              ? {
+                  ...current,
+                  instrumentId: String(existing.id),
+                  accountId:
+                    editingPlan?.instrument_id === existing.id
+                      ? String(editingPlan.account_id)
+                      : account
+                        ? String(account.id)
+                        : current.accountId,
+                }
+              : current,
+          );
+          setLookupNote(
+            `已匹配已有产品：${existing.name}${account ? `；推荐账户 ${account.name}` : ""}`,
+          );
+          return;
+        }
+        setResolvedInstrument(null);
+        if (!isCompleteCode) {
+          setLookupBusy(false);
+          setLookupNote(
+            preferredProductType === "STOCK"
+              ? "自动匹配目前支持沪深 A 股，例如 600519、SZ000001 或 600519.SH"
+              : "请输入完整的 6 位基金或 ETF 代码",
+          );
+          return;
+        }
+        setLookupBusy(true);
+        setLookupNote(
+          `正在查询${preferredProductType === "STOCK" ? "股票" : "基金 / ETF"}名称和分类…`,
+        );
+        try {
+          const response = await fetch("/api/portfolio", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "lookupInstrument",
+              code,
+              preferredProductType,
+            }),
+            signal: controller.signal,
+          });
+          const result = (await response.json()) as {
+            error?: string;
+            instrument?: PortfolioData["instruments"][number];
+            fundCategory?: string;
+            quoteSource?: string;
+          };
+          if (!response.ok || !result.instrument)
+            throw new Error(result.error || "没有查询到该产品代码");
+          const productTypeMatches =
+            preferredProductType === "STOCK"
+              ? result.instrument.product_type === "STOCK"
+              : ["FUND", "ETF"].includes(result.instrument.product_type);
+          if (!productTypeMatches)
+            throw new Error(
+              `该代码返回的是${productTypeLabel(result.instrument)}，请检查“代码类别”后重试`,
+            );
+          const account = matchingAccount(
+            data.accounts,
+            result.instrument,
+            data.holdings,
+          );
+          setResolvedInstrument(result.instrument);
+          setFundCategory(result.fundCategory ?? "");
+          setForm((current) =>
+            current.instrumentCode === code &&
+            current.preferredProductType === preferredProductType
+              ? {
+                  ...current,
+                  instrumentId:
+                    Number(result.instrument?.id ?? 0) > 0
+                      ? String(result.instrument?.id)
+                      : "",
+                  accountId: account ? String(account.id) : current.accountId,
+                }
+              : current,
+          );
+          setLookupNote(
+            `已自动匹配：${result.instrument.name} · ${productTypeLabel(result.instrument)} · ${result.instrument.asset_class}${account ? `；推荐账户 ${account.name}` : ""}`,
+          );
+        } catch (caught) {
+          if (!controller.signal.aborted) {
+            setResolvedInstrument(null);
+            setForm((current) =>
+              current.instrumentCode === code
+                ? { ...current, instrumentId: "" }
+                : current,
+            );
+            setLookupNote(
+              caught instanceof Error ? caught.message : "产品查询失败",
+            );
+          }
+        } finally {
+          if (!controller.signal.aborted) setLookupBusy(false);
+        }
+      },
+      existing ? 0 : 500,
+    );
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    data.accounts,
+    data.holdings,
+    data.instruments,
+    editingPlan?.account_id,
+    editingPlan?.instrument_id,
+    form.instrumentCode,
+    form.preferredProductType,
     type,
   ]);
   const calculatedAmount = Number(form.quantity || 0) * Number(form.price || 0);
@@ -2714,9 +3543,17 @@ function ModalForm({
         ? calculatedAmount.toFixed(2)
         : ""
       : (form.amount ?? "");
+  const confirmationEstimate =
+    confirmationBusinessDays !== null && form.tradeDate
+      ? estimateFundConfirmationDate(form.tradeDate, {
+          businessDays: confirmationBusinessDays,
+          tradeTime: form.tradeTime,
+          isExchangeTraded: selectedInstrument?.product_type === "ETF",
+        })
+      : null;
   const displayedConfirmationDate =
-    confirmationIsAuto && confirmationBusinessDays !== null
-      ? addBusinessDays(form.tradeDate, confirmationBusinessDays)
+    confirmationIsAuto && confirmationEstimate
+      ? confirmationEstimate.confirmationDate
       : (form.confirmationDate ?? "");
   const displayedFee =
     feeIsAuto && form.kind === "BUY"
@@ -2792,6 +3629,12 @@ function ModalForm({
             : "更新价格 / 净值";
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (type === "plan" && (lookupBusy || !selectedInstrument)) {
+      setLookupNote(
+        lookupBusy ? "请等待产品代码查询完成" : "请先输入并匹配有效的产品代码",
+      );
+      return;
+    }
     const action =
       type === "entry"
         ? "createEntry"
@@ -2809,15 +3652,96 @@ function ModalForm({
       ...form,
       ...(editingPlan ? { id: editingPlan.id } : {}),
     };
+    if (type === "entry") payload.autoRenameAccount = form.kind === "BUY";
+    if (type === "entry" && ["BUY", "SELL", "DIVIDEND"].includes(form.kind)) {
+      if (lookupBusy || !selectedInstrument) {
+        setLookupNote(
+          lookupBusy
+            ? "请等待产品代码查询完成"
+            : "请先输入并匹配有效的产品代码",
+        );
+        return;
+      }
+      setLookupBusy(true);
+      setLookupNote("正在确认并保存产品资料…");
+      try {
+        const response = await fetch("/api/portfolio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "resolveInstrument",
+            code: form.instrumentCode,
+            tradeDate: form.tradeDate,
+            preferredProductType:
+              form.preferredProductType === "STOCK" ? "STOCK" : "FUND",
+          }),
+        });
+        const result = (await response.json()) as {
+          error?: string;
+          instrument?: PortfolioData["instruments"][number];
+        };
+        if (!response.ok || !result.instrument?.id)
+          throw new Error(result.error || "产品资料保存失败");
+        payload.instrumentId = String(result.instrument.id);
+        setResolvedInstrument(result.instrument);
+        setForm((current) => ({
+          ...current,
+          instrumentId: String(result.instrument?.id ?? ""),
+        }));
+      } catch (caught) {
+        setLookupNote(
+          caught instanceof Error ? caught.message : "产品资料保存失败",
+        );
+        return;
+      } finally {
+        setLookupBusy(false);
+      }
+    }
+    if (type === "plan") {
+      setLookupBusy(true);
+      setLookupNote("正在确认并保存产品资料…");
+      try {
+        const response = await fetch("/api/portfolio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "resolveInstrument",
+            code: form.instrumentCode,
+            preferredProductType:
+              form.preferredProductType === "STOCK" ? "STOCK" : "FUND",
+          }),
+        });
+        const result = (await response.json()) as {
+          error?: string;
+          instrument?: PortfolioData["instruments"][number];
+        };
+        if (!response.ok || !result.instrument?.id)
+          throw new Error(result.error || "产品资料保存失败");
+        payload.instrumentId = String(result.instrument.id);
+        setResolvedInstrument(result.instrument);
+        setForm((current) => ({
+          ...current,
+          instrumentId: String(result.instrument?.id ?? ""),
+        }));
+      } catch (caught) {
+        setLookupNote(
+          caught instanceof Error ? caught.message : "产品资料保存失败",
+        );
+        return;
+      } finally {
+        setLookupBusy(false);
+      }
+    }
     if (type === "entry" && ["BUY", "SELL"].includes(form.kind)) {
-      if (amountIsAuto) payload.amount = "";
       if (feeIsAuto) payload.fee = "";
       payload.confirmationDate = displayedConfirmationDate;
     }
     await submit(
       payload,
       type === "entry"
-        ? "流水已记入，收益已重算"
+        ? form.kind === "BUY"
+          ? "买入流水已保存，账户名称已同步为正式产品名称，收益已重算"
+          : "流水已记入，收益已重算"
         : editingPlan
           ? "定投计划已更新"
           : "已保存",
@@ -2882,19 +3806,68 @@ function ModalForm({
                       </option>
                     ))}
                   </select>
+                  {form.kind === "BUY" && selectedInstrument && (
+                    <small>
+                      保存买入后，此账户名称会自动改为“
+                      {selectedInstrument.name}”
+                    </small>
+                  )}
                 </Field>
+                {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (
+                  <Field label="代码类别">
+                    <select
+                      value={form.preferredProductType}
+                      onChange={(event) => {
+                        const preferredProductType =
+                          event.target.value === "STOCK" ? "STOCK" : "FUND";
+                        setForm((current) => ({
+                          ...current,
+                          preferredProductType,
+                          instrumentId: "",
+                          price: "",
+                          amount: "",
+                          fee: "",
+                        }));
+                        setResolvedInstrument(null);
+                        setLookupNote(
+                          form.instrumentCode
+                            ? `将按${preferredProductType === "STOCK" ? "沪深 A 股" : "基金 / ETF"}重新匹配代码`
+                            : "",
+                        );
+                      }}
+                    >
+                      <option value="FUND">基金 / ETF</option>
+                      <option value="STOCK">沪深 A 股</option>
+                    </select>
+                    <small>
+                      同一组六位代码可能对应不同产品，请明确选择类别
+                    </small>
+                  </Field>
+                )}
                 {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (
                   <Field label="基金 / 证券代码">
                     <input
                       required
                       list="instrument-codes"
                       autoComplete="off"
-                      placeholder="输入代码，例如 000001"
+                      placeholder={
+                        form.preferredProductType === "STOCK"
+                          ? "例如 600519、SZ000001"
+                          : "例如 001513、510300"
+                      }
                       value={form.instrumentCode}
                       onChange={(event) => {
                         const code = event.target.value.trim().toUpperCase();
-                        const matched = data.instruments.find(
-                          (item) => item.code.toUpperCase() === code,
+                        const preferredProductType =
+                          form.preferredProductType === "STOCK"
+                            ? "STOCK"
+                            : "FUND";
+                        const matched = data.instruments.find((item) =>
+                          instrumentCodeMatches(
+                            item,
+                            code,
+                            preferredProductType,
+                          ),
                         );
                         setForm((current) => ({
                           ...current,
@@ -2918,10 +3891,14 @@ function ModalForm({
                         setLookupNote(
                           matched
                             ? `已匹配：${matched.name}`
-                            : /^\d{6}$/.test(code)
-                              ? "正在自动匹配真实基金数据…"
+                            : /^(?:(?:SH|SZ)?\d{6}|\d{6}\.(?:SH|SZ))$/.test(
+                                  code,
+                                )
+                              ? "正在自动匹配产品名称、类型和所选日期价格…"
                               : code
-                                ? "请输入完整的 6 位基金或 ETF 代码"
+                                ? preferredProductType === "STOCK"
+                                  ? "请输入沪深 A 股代码"
+                                  : "请输入完整的 6 位基金或 ETF 代码"
                                 : "",
                         );
                       }}
@@ -2935,11 +3912,11 @@ function ModalForm({
                     </datalist>
                     <small>
                       {lookupBusy
-                        ? "正在查询基金名称、净值和真实费率…"
+                        ? "正在查询产品名称、分类和所选日期价格…"
                         : lookupNote ||
                           (selectedInstrument
                             ? `${selectedInstrument.name} · ${selectedInstrument.product_type}`
-                            : "输入 6 位代码后自动匹配，无需预先新增产品")}
+                            : "输入代码后自动匹配，无需预先新增产品")}
                     </small>
                     {selectedInstrument && (
                       <div className="classification-line">
@@ -2969,16 +3946,29 @@ function ModalForm({
                         }));
                       }}
                     >
-                      <option value="DIRECT">基金公司直销</option>
-                      <option value="EASTMONEY">天天基金（第三方）</option>
-                      <option value="OTHER">其他第三方 / 银行 / 券商</option>
+                      {form.preferredProductType === "STOCK" ? (
+                        <>
+                          <option value="OTHER">证券公司 / 券商</option>
+                          <option value="DIRECT">其他直连渠道</option>
+                        </>
+                      ) : (
+                        <>
+                          <option value="DIRECT">基金公司直销</option>
+                          <option value="EASTMONEY">天天基金（第三方）</option>
+                          <option value="OTHER">
+                            其他第三方 / 银行 / 券商
+                          </option>
+                        </>
+                      )}
                     </select>
                     <small>
-                      {form.purchaseChannel === "DIRECT"
-                        ? "采用基金公开标准申购费率"
-                        : form.purchaseChannel === "EASTMONEY"
-                          ? "采用同步的天天基金当前优惠费率"
-                          : "请在手续费中填写该渠道成交账单的实际费用"}
+                      {form.preferredProductType === "STOCK"
+                        ? "券商佣金和税费因账户、市场与成交单而异，请按实际账单填写"
+                        : form.purchaseChannel === "DIRECT"
+                          ? "采用基金公开标准申购费率"
+                          : form.purchaseChannel === "EASTMONEY"
+                            ? "采用同步的天天基金当前优惠费率"
+                            : "请在手续费中填写该渠道成交账单的实际费用"}
                     </small>
                   </Field>
                 )}
@@ -2987,7 +3977,10 @@ function ModalForm({
                     required
                     type="date"
                     value={form.tradeDate}
-                    onChange={(e) => set("tradeDate", e.target.value)}
+                    onChange={(e) => {
+                      setConfirmationIsAuto(true);
+                      set("tradeDate", e.target.value);
+                    }}
                   />
                 </Field>
                 {["BUY", "SELL"].includes(form.kind) &&
@@ -2995,22 +3988,39 @@ function ModalForm({
                     ["FUND", "ETF"].includes(
                       selectedInstrument.product_type,
                     )) && (
-                    <Field label="份额确认日期">
-                      <input
-                        type="date"
-                        min={form.tradeDate}
-                        value={displayedConfirmationDate}
-                        onChange={(e) => {
-                          setConfirmationIsAuto(false);
-                          set("confirmationDate", e.target.value);
-                        }}
-                      />
-                      <small>
-                        {confirmationBusinessDays === null
-                          ? "匹配代码后自动估算，实际确认单可覆盖"
-                          : `已按 T+${confirmationBusinessDays} 工作日自动估算；节假日或基金规则不同请按确认单覆盖`}
-                      </small>
-                    </Field>
+                    <>
+                      {selectedInstrument?.product_type !== "ETF" && (
+                        <Field label="下单时间（中国时间）">
+                          <input
+                            type="time"
+                            value={form.tradeTime ?? ""}
+                            onChange={(e) => {
+                              setConfirmationIsAuto(true);
+                              set("tradeTime", e.target.value);
+                            }}
+                          />
+                          <small>15:00 前通常按当日申请；15:00 起预计顺延至下一工作日。</small>
+                        </Field>
+                      )}
+                      <Field label="份额确认日期">
+                        <input
+                          type="date"
+                          min={form.tradeDate}
+                          value={displayedConfirmationDate}
+                          onChange={(e) => {
+                            setConfirmationIsAuto(false);
+                            set("confirmationDate", e.target.value);
+                          }}
+                        />
+                        <small>
+                          {confirmationBusinessDays === null
+                            ? "匹配代码后自动估算，实际确认单可覆盖"
+                            : selectedInstrument?.product_type === "ETF"
+                              ? "场内 ETF 按成交日记账；以券商成交回报为准。"
+                              : `预计：受理日 ${confirmationEstimate?.acceptedDate ?? "—"}，按 T+${confirmationBusinessDays} 工作日确认${confirmationEstimate?.cutoffPassed ? "（已过 15:00 截止）" : ""}。法定节假日及基金合同规则以确认单为准。`}
+                        </small>
+                      </Field>
+                    </>
                   )}
                 {["BUY", "SELL"].includes(form.kind) && (
                   <>
@@ -3020,9 +4030,20 @@ function ModalForm({
                         inputMode="decimal"
                         placeholder="0.000000"
                         value={form.quantity ?? ""}
-                        onChange={(e) => set("quantity", e.target.value)}
+                        onChange={(e) => {
+                          const q = e.target.value;
+                          setQuantityIsAuto(!q.trim());
+                          set("quantity", q);
+                          if (form.price && Number(q) > 0) {
+                            set("amount", (Number(q) * Number(form.price)).toFixed(2));
+                          }
+                        }}
                       />
-                      <small>份额属于个人成交数据，请按成交确认单填写</small>
+                      <small>
+                        {quantityIsAuto && form.price && Number(form.amount) > 0
+                          ? `已按 ¥${Number(form.amount).toFixed(2)} ÷ 净值 ${Number(form.price).toFixed(4)} 自动计算`
+                          : "可直接输入份额覆盖，或输入购买金额自动计算份额"}
+                      </small>
                     </Field>
                     <Field label="成交价格 / 净值">
                       <input
@@ -3056,14 +4077,22 @@ function ModalForm({
                     placeholder="0.00"
                     value={displayedAmount}
                     onChange={(e) => {
-                      setAmountIsAuto(!e.target.value.trim());
-                      set("amount", e.target.value);
+                      const val = e.target.value;
+                      setAmountIsAuto(!val.trim());
+                      const price = Number(form.price);
+                      if (price > 0 && Number(val) > 0) {
+                        const qty = (Number(val) / price).toFixed(6);
+                        setForm((current) => ({ ...current, amount: val, quantity: qty }));
+                        setQuantityIsAuto(true);
+                      } else {
+                        set("amount", val);
+                      }
                     }}
                   />
                   <small>
-                    {amountIsAuto
-                      ? "已按份额 × 净值自动计算；保存时服务器使用完整精度"
-                      : "已使用手工成交金额；清空可恢复自动计算"}
+                    {form.price && Number(form.amount) > 0
+                      ? `已按金额自动计算份额 ${(Number(form.amount) / Number(form.price)).toFixed(4)} 份`
+                      : "输入购买金额后自动按当日净值计算份额"}
                   </small>
                 </Field>
                 {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (
@@ -3298,13 +4327,79 @@ function ModalForm({
                     </option>
                   ))}
                 </select>
+                <small>系统会按产品自动推荐，您仍可手动选择其他账户</small>
               </Field>
-              <Field label="投资产品">
+              <Field label="产品代码">
+                <input
+                  required
+                  autoFocus
+                  list="instrument-codes"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={
+                    form.preferredProductType === "STOCK"
+                      ? "例如 600519、SZ000001"
+                      : "例如 001513、510300"
+                  }
+                  value={form.instrumentCode}
+                  onChange={(event) => {
+                    const code = event.target.value.trim().toUpperCase();
+                    const preferredProductType =
+                      form.preferredProductType === "STOCK" ? "STOCK" : "FUND";
+                    const matched = data.instruments.find(
+                      (item) =>
+                        item.code.toUpperCase() === code &&
+                        (preferredProductType === "STOCK"
+                          ? item.product_type === "STOCK"
+                          : ["FUND", "ETF"].includes(item.product_type)),
+                    );
+                    const account = matched
+                      ? matchingAccount(data.accounts, matched, data.holdings)
+                      : null;
+                    setForm((current) => ({
+                      ...current,
+                      instrumentCode: code,
+                      instrumentId: matched ? String(matched.id) : "",
+                      accountId: account
+                        ? String(account.id)
+                        : current.accountId,
+                    }));
+                    setResolvedInstrument(matched ?? null);
+                    setFundCategory("");
+                    setLookupNote(
+                      matched
+                        ? `已匹配已有产品：${matched.name}${account ? `；推荐账户 ${account.name}` : ""}`
+                        : code
+                          ? "输入完成后将自动查询产品名称与分类"
+                          : "",
+                    );
+                  }}
+                />
+                <datalist id="instrument-codes">
+                  {data.instruments.map((item) => (
+                    <option key={item.id} value={item.code}>
+                      {item.name} · {productTypeLabel(item)}
+                    </option>
+                  ))}
+                </datalist>
+                <small>
+                  {lookupNote || "输入代码即可匹配，无需先去产品页面新增"}
+                </small>
+              </Field>
+              <Field label="代码类别">
                 <select
-                  value={form.instrumentId}
+                  value={form.preferredProductType}
                   onChange={(e) => {
+                    const preferredProductType = e.target.value;
+                    const code = (form.instrumentCode ?? "")
+                      .trim()
+                      .toUpperCase();
                     const instrument = data.instruments.find(
-                      (item) => item.id === Number(e.target.value),
+                      (item) =>
+                        item.code.toUpperCase() === code &&
+                        (preferredProductType === "STOCK"
+                          ? item.product_type === "STOCK"
+                          : ["FUND", "ETF"].includes(item.product_type)),
                     );
                     const account = instrument
                       ? matchingAccount(
@@ -3315,32 +4410,68 @@ function ModalForm({
                       : null;
                     setForm((current) => ({
                       ...current,
-                      instrumentId: e.target.value,
+                      preferredProductType,
+                      instrumentId: instrument ? String(instrument.id) : "",
                       accountId: account
                         ? String(account.id)
                         : current.accountId,
                     }));
+                    setResolvedInstrument(instrument ?? null);
+                    setFundCategory("");
+                    setLookupNote(
+                      instrument
+                        ? `已匹配已有产品：${instrument.name}${account ? `；推荐账户 ${account.name}` : ""}`
+                        : code
+                          ? `将按${preferredProductType === "STOCK" ? "股票" : "基金 / ETF"}查询该代码`
+                          : "",
+                    );
                   }}
                 >
-                  {data.instruments.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
+                  <option value="FUND">基金 / ETF</option>
+                  <option value="STOCK">股票</option>
                 </select>
-                <div className="plan-match-note">
+                <small>
+                  六位代码可能重名，请明确选择基金或股票；自动行情目前支持沪深 A
+                  股
+                </small>
+              </Field>
+              <div
+                className={`plan-match-note wide ${
+                  lookupBusy
+                    ? "loading"
+                    : selectedInstrument
+                      ? "matched"
+                      : "pending"
+                }`}
+                aria-live="polite"
+              >
+                <div className="plan-match-icon">
+                  {lookupBusy ? (
+                    <RefreshCcw size={18} className="spin" />
+                  ) : selectedInstrument ? (
+                    <Check size={18} />
+                  ) : (
+                    <Search size={18} />
+                  )}
+                </div>
+                <div>
                   <strong>
-                    自动分类：
-                    {productTypeLabel(selectedInstrument)}
-                    {selectedInstrument?.asset_class
-                      ? ` · ${selectedInstrument.asset_class}`
-                      : ""}
+                    {lookupBusy
+                      ? "正在查询产品资料…"
+                      : selectedInstrument
+                        ? selectedInstrument.name
+                        : "等待匹配产品"}
                   </strong>
                   <span>
-                    选择产品后会按名称和资产类别自动匹配账户，仍可手工覆盖
+                    {selectedInstrument
+                      ? `${selectedInstrument.code} · ${productTypeLabel(selectedInstrument)} · ${selectedInstrument.asset_class}${selectedInstrument.market ? ` · ${selectedInstrument.market}` : ""}`
+                      : lookupNote || "输入完整代码后显示名称、类型与资产类别"}
                   </span>
+                  {selectedInstrument && fundCategory && (
+                    <span>基金分类：{fundCategory}</span>
+                  )}
                 </div>
-              </Field>
+              </div>
               <Field label="每月金额">
                 <input
                   required
@@ -3420,7 +4551,12 @@ function ModalForm({
           <button type="button" className="secondary-button" onClick={onClose}>
             取消
           </button>
-          <button className="primary-button" disabled={busy}>
+          <button
+            className="primary-button"
+            disabled={
+              busy || (type === "plan" && (lookupBusy || !selectedInstrument))
+            }
+          >
             {busy ? (
               <RefreshCcw size={17} className="spin" />
             ) : (

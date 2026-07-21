@@ -26,6 +26,10 @@ export interface InstrumentRow {
   redemption_fee_json: string;
   data_source: string;
   source_updated_at: string;
+  /** Optional for backwards compatibility with historical/test rows created before fee metadata. */
+  management_fee_bps?: number;
+  /** Optional for backwards compatibility with historical/test rows created before fee metadata. */
+  custodian_fee_bps?: number;
 }
 
 export interface LedgerRow {
@@ -70,4 +74,22 @@ export interface TargetRow {
   instrument_id: number;
   target_bps: number;
   alert_bps: number;
+}
+
+export interface JournalRow {
+  id: number;
+  account_id: number | null;
+  instrument_id: number | null;
+  entry_date: string;
+  title: string;
+  decision: string;
+  mood: string;
+  thesis: string;
+  review_date: string;
+  review_note: string;
+  created_at: string;
+  updated_at: string;
+  account_name: string | null;
+  instrument_name: string | null;
+  instrument_code: string | null;
 }
