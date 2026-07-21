@@ -28,9 +28,11 @@ import {
   calculateBuyOnlyTopUp,
   calculateRequiredMonthlyContribution,
   combineDcaComparisons,
+  estimateHistoricalAnnualizedReturn,
   projectLongTermDca,
   simulateDcaVsLumpSum,
   type DcaPortfolioComparison,
+  type HistoricalAnnualizedReturnEstimate,
   type LongTermDcaProjection,
 } from "@/lib/investment-planning";
 
@@ -1155,6 +1157,12 @@ interface HistoryDataset {
   returnMethod: string;
 }
 
+interface HistoricalRateState {
+  estimate: HistoricalAnnualizedReturnEstimate | null;
+  sourceLabel: string;
+  error: string;
+}
+
 const historyPeriodLabel = (period: HistoryPeriod) => {
   if (period === "custom") return "自定义日期";
   const months = Number(period);
@@ -1203,12 +1211,67 @@ export function DcaSimulator({
   const [annualReturn, setAnnualReturn] = useState("8");
   const [initialAmount, setInitialAmount] = useState("0");
   const [goalAmount, setGoalAmount] = useState("1000000");
+  const [historicalRate, setHistoricalRate] = useState<HistoricalRateState>({
+    estimate: null,
+    sourceLabel: "",
+    error: "",
+  });
+  const [historicalRateLoading, setHistoricalRateLoading] = useState(false);
+  const [historicalRateReload, setHistoricalRateReload] = useState(0);
   const selected =
     eligible.find((instrument) => String(instrument.id) === instrumentId) ??
     eligible[0];
-  const annualFundFeeRate =
+  const selectedCode = selected?.code ?? "";
+  const publishedAnnualExpenseRate =
     ((selected?.management_fee_bps ?? 0) + (selected?.custodian_fee_bps ?? 0)) /
     10_000;
+  // Public fund NAV is already published after management and custody fees.
+  // Do not deduct those fees again when the input is a historical NAV return.
+  const projectionAnnualFeeRate = 0;
+
+  useEffect(() => {
+    if (!selectedCode) return;
+    const controller = new AbortController();
+    void (async () => {
+      // Yield once so this external-data synchronization never performs a
+      // synchronous cascading render inside the effect itself.
+      await Promise.resolve();
+      if (controller.signal.aborted) return;
+      setHistoricalRateLoading(true);
+      setHistoricalRate({ estimate: null, sourceLabel: "", error: "" });
+      try {
+        const response = await fetch(`/api/fund-history?code=${selectedCode}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const payload = (await response.json()) as {
+          error?: string;
+          points?: Array<{ date: string; nav: number; totalReturnNav?: number }>;
+          sourceLabel?: string;
+        };
+        if (!response.ok || !payload.points?.length)
+          throw new Error(payload.error || "历史净值读取失败");
+        const estimate = estimateHistoricalAnnualizedReturn(payload.points, 3);
+        if (controller.signal.aborted) return;
+        setHistoricalRate({
+          estimate,
+          sourceLabel: payload.sourceLabel || "公开历史净值",
+          error: "",
+        });
+        setAnnualReturn((estimate.annualizedReturn * 100).toFixed(2));
+      } catch (caught) {
+        if (controller.signal.aborted) return;
+        setHistoricalRate({
+          estimate: null,
+          sourceLabel: "",
+          error: caught instanceof Error ? caught.message : "历史收益率估算失败",
+        });
+      } finally {
+        if (!controller.signal.aborted) setHistoricalRateLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [historicalRateReload, selectedCode]);
 
   const clearHistoricalResult = () => {
     setResult(null);
@@ -1327,7 +1390,7 @@ export function DcaSimulator({
           years: Number(projectionYears),
           annualReturn: Number(annualReturn) / 100,
           initialAmount: Number(initialAmount || 0),
-          annualFeeRate: annualFundFeeRate,
+          annualFeeRate: projectionAnnualFeeRate,
         }),
         error: "",
       };
@@ -1337,7 +1400,7 @@ export function DcaSimulator({
         error: caught instanceof Error ? caught.message : "测算参数不正确",
       };
     }
-  }, [annualFundFeeRate, annualReturn, initialAmount, monthlyAmount, projectionYears]);
+  }, [annualReturn, initialAmount, monthlyAmount, projectionAnnualFeeRate, projectionYears]);
 
   const projectionScenarios = useMemo(() => {
     try {
@@ -1354,13 +1417,13 @@ export function DcaSimulator({
           years: Number(projectionYears),
           annualReturn: scenario.rate,
           initialAmount: Number(initialAmount || 0),
-          annualFeeRate: annualFundFeeRate,
+          annualFeeRate: projectionAnnualFeeRate,
         }),
       }));
     } catch {
       return [];
     }
-  }, [annualFundFeeRate, annualReturn, initialAmount, monthlyAmount, projectionYears]);
+  }, [annualReturn, initialAmount, monthlyAmount, projectionAnnualFeeRate, projectionYears]);
 
   const goalCalculation = useMemo(() => {
     try {
@@ -1368,13 +1431,13 @@ export function DcaSimulator({
         targetAmount: Number(goalAmount),
         years: Number(projectionYears),
         annualReturn: Number(annualReturn) / 100,
-        annualFeeRate: annualFundFeeRate,
+        annualFeeRate: projectionAnnualFeeRate,
         initialAmount: Number(initialAmount || 0),
       });
     } catch {
       return null;
     }
-  }, [annualFundFeeRate, annualReturn, goalAmount, initialAmount, projectionYears]);
+  }, [annualReturn, goalAmount, initialAmount, projectionAnnualFeeRate, projectionYears]);
 
   const projection = projectionCalculation.result;
   const projectionCurve = projection
@@ -1446,6 +1509,12 @@ export function DcaSimulator({
           <strong>长期测算</strong>
           <span>持续投入 1–30 年</span>
         </button>
+      </div>
+
+      <div className="simulator-reading-guide" aria-label="结果口径说明">
+        <span><b>每月投入</b>：仅指本月计划投入金额，不是月度盈利</span>
+        <span><b>累计收益</b>：从回测/测算开始到期末的总盈亏</span>
+        <span><b>年化 XIRR</b>：把多笔投入按实际日期换算的年收益率</span>
       </div>
 
       {mode === "history" ? (
@@ -1676,26 +1745,26 @@ export function DcaSimulator({
 
               <div className="simulator-summary-cards">
                 <article>
-                  <span>累计投入本金</span>
+                  <span>回测期间累计本金</span>
                   <strong>¥{money(result.dca.invested)}</strong>
                   <small>
-                    {result.components.length} 个产品 · {result.executionCount} 笔计划投入
+                    {result.startDate} 至 {result.endDate} · {result.executionCount} 笔计划投入
                   </small>
                 </article>
                 <article>
-                  <span>按月定投期末市值</span>
+                  <span>回测期末组合市值</span>
                   <strong>¥{money(result.dca.finalValue)}</strong>
                   <small className={result.dca.profit >= 0 ? "up" : "down"}>
-                    {result.dca.profit >= 0 ? "+" : ""}¥
+                    回测期间累计收益 {result.dca.profit >= 0 ? "+" : ""}¥
                     {money(result.dca.profit)} ·{" "}
                     {percentText(result.dca.returnRate)}
                   </small>
                 </article>
                 <article>
-                  <span>首日一次投入期末市值</span>
+                  <span>同期一次投入期末市值</span>
                   <strong>¥{money(result.lumpSum.finalValue)}</strong>
                   <small className={result.lumpSum.profit >= 0 ? "up" : "down"}>
-                    {result.lumpSum.profit >= 0 ? "+" : ""}¥
+                    对照组累计收益 {result.lumpSum.profit >= 0 ? "+" : ""}¥
                     {money(result.lumpSum.profit)} ·{" "}
                     {percentText(result.lumpSum.returnRate)}
                   </small>
@@ -1728,6 +1797,13 @@ export function DcaSimulator({
               </div>
 
               <div className="dca-component-results" aria-label="各产品回测结果">
+                <div className="dca-component-results-heading">
+                  <div>
+                    <strong>多产品收益明细</strong>
+                    <span>每项都是该产品在同一回测区间的独立收益，不会混入组合总收益。</span>
+                  </div>
+                  <b>{result.components.length} 个产品合并计算</b>
+                </div>
                 {result.components.map((component) => (
                   <article key={component.instrumentId}>
                     <div>
@@ -1739,9 +1815,15 @@ export function DcaSimulator({
                       <b>¥{money(component.result.dca.finalValue)}</b>
                     </div>
                     <div>
-                      <span>收益</span>
+                      <span>回测期累计收益</span>
                       <b className={component.result.dca.profit >= 0 ? "up" : "down"}>
                         {component.result.dca.profit >= 0 ? "+" : ""}¥{money(component.result.dca.profit)}
+                      </b>
+                    </div>
+                    <div>
+                      <span>回测期收益率</span>
+                      <b className={component.result.dca.profit >= 0 ? "up" : "down"}>
+                        {percentText(component.result.dca.returnRate)}
                       </b>
                     </div>
                     <div>
@@ -1845,7 +1927,7 @@ export function DcaSimulator({
         <div className="simulator-workspace projection-workspace">
           <div className="projection-controls">
             <label className="projection-product">
-              <span>用于费用估算的产品</span>
+              <span>选择产品（自动估算历史收益率）</span>
               <select
                 value={selected ? String(selected.id) : ""}
                 onChange={(event) => setInstrumentId(event.target.value)}
@@ -1856,6 +1938,7 @@ export function DcaSimulator({
                   </option>
                 ))}
               </select>
+              <small className="projection-field-help">选择产品后，会自动读取近 3 年公开历史净值并估算年化净收益率。</small>
             </label>
             <label>
               <span>每月持续投入</span>
@@ -1889,7 +1972,7 @@ export function DcaSimulator({
               </div>
             </label>
             <label>
-              <span>假设年化收益率</span>
+              <span>历史年化净收益率（自动估算，可修改）</span>
               <div className="years-input">
                 <input
                   type="number"
@@ -1902,6 +1985,16 @@ export function DcaSimulator({
                 />
                 <i>%</i>
               </div>
+              <small className="projection-rate-source">
+                {historicalRateLoading
+                  ? "正在读取该产品近 3 年历史净值…"
+                  : historicalRate.estimate
+                    ? `自动估算：${historicalRate.estimate.startDate} 至 ${historicalRate.estimate.endDate}，覆盖 ${historicalRate.estimate.yearsCovered.toFixed(1)} 年${historicalRate.estimate.limitedByHistory ? "（历史不足 3 年）" : ""}，来源：${historicalRate.sourceLabel}`
+                    : historicalRate.error || "尚未取得可用历史净值"}
+                <button type="button" onClick={() => setHistoricalRateReload((value) => value + 1)} disabled={historicalRateLoading}>
+                  重新估算
+                </button>
+              </small>
             </label>
             <label>
               <span>可选初始投入</span>
@@ -1932,9 +2025,8 @@ export function DcaSimulator({
           </div>
 
           <div className="projection-fee-note">
-            <strong>已纳入产品年度费率：</strong>
-            管理费 {((selected?.management_fee_bps ?? 0) / 100).toFixed(3)}% + 托管费 {((selected?.custodian_fee_bps ?? 0) / 100).toFixed(3)}% = {(annualFundFeeRate * 100).toFixed(3)}%。
-            申购费、赎回费和税费会因渠道及持有期不同而变化，未纳入长期情景。
+            <strong>收益率口径：</strong>
+            自动收益率使用历史累计净值/净值计算；该产品公布的管理费与托管费合计 {(publishedAnnualExpenseRate * 100).toFixed(3)}% 已反映在公开净值中，因此不会重复扣除。申购费、赎回费和税费会因渠道及持有期不同而变化，未纳入长期情景。
           </div>
 
           <div className="projection-year-presets" aria-label="常用持续年限">
@@ -1962,9 +2054,9 @@ export function DcaSimulator({
                     每月投入 ¥{money(projection.monthlyAmount)}，持续{" "}
                     {projection.years} 年
                   </span>
-                  <strong>预计资产 ¥{money(projection.finalValue)}</strong>
+                  <strong>第 {projection.years} 年末情景资产 ¥{money(projection.finalValue)}</strong>
                   <small>
-                    在“每年 {annualReturn}%”这一固定情景下计算，不是收益承诺
+                    基于历史年化净收益率 {annualReturn}% 的固定情景；不是每月盈利，也不是收益承诺
                   </small>
                 </div>
                 <div className="projection-duration">
@@ -1975,7 +2067,7 @@ export function DcaSimulator({
 
               <div className="simulator-summary-cards projection-summary">
                 <article>
-                  <span>累计投入本金</span>
+                  <span>{projection.years} 年累计投入本金</span>
                   <strong>¥{money(projection.principal)}</strong>
                   <small>
                     初始 ¥{money(projection.initialAmount)} + 月投 ¥
@@ -1983,18 +2075,18 @@ export function DcaSimulator({
                   </small>
                 </article>
                 <article>
-                  <span>情景预计资产</span>
+                  <span>第 {projection.years} 年末情景资产</span>
                   <strong>¥{money(projection.finalValue)}</strong>
-                  <small>复利按月折算</small>
+                  <small>不是单月资产，按月复利折算到期末</small>
                 </article>
                 <article>
-                  <span>情景预计收益</span>
+                  <span>{projection.years} 年累计情景收益</span>
                   <strong className={projection.profit >= 0 ? "up" : "down"}>
                     {projection.profit >= 0 ? "+" : ""}¥
                     {money(projection.profit)}
                   </strong>
                   <small className={projection.profit >= 0 ? "up" : "down"}>
-                    相对本金 {percentText(projection.returnRate)}
+                    相对 {projection.years} 年累计本金 {percentText(projection.returnRate)}
                   </small>
                 </article>
               </div>
@@ -2004,7 +2096,7 @@ export function DcaSimulator({
                   <article key={scenario.label} className={scenario.tone}>
                     <span>{scenario.label}情景</span>
                     <strong>{(scenario.rate * 100).toFixed(1)}%</strong>
-                    <small>预计资产 ¥{money(scenario.result.finalValue)}</small>
+                    <small>{projection.years} 年末资产 ¥{money(scenario.result.finalValue)}</small>
                   </article>
                 ))}
               </div>
@@ -2015,7 +2107,7 @@ export function DcaSimulator({
                     <span>{projection.years} 年后目标 ¥{money(goalCalculation.targetAmount)}</span>
                     <strong>建议每月投入 ¥{money(goalCalculation.requiredMonthlyAmount)}</strong>
                     <small>
-                      使用基准年化 {annualReturn}%、年度费率 {(annualFundFeeRate * 100).toFixed(3)}% 与初始资金 ¥{money(goalCalculation.initialAmount)} 反推。
+                      使用历史年化净收益率 {annualReturn}% 与初始资金 ¥{money(goalCalculation.initialAmount)} 反推；收益率已按公开净值口径处理。
                     </small>
                   </div>
                   <button
@@ -2030,8 +2122,8 @@ export function DcaSimulator({
               <div className="simulator-chart-card">
                 <div className="simulator-chart-head">
                   <div>
-                    <strong>逐年本金与资产曲线</strong>
-                    <span>拖动或修改上方参数，结果会立即重新计算</span>
+                    <strong>逐年累计本金与期末资产</strong>
+                    <span>每一个点都是该年年末，不表示当月盈利；修改参数后会立即重算</span>
                   </div>
                   <span>{projection.years} 年情景</span>
                 </div>

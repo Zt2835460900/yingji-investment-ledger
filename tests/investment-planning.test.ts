@@ -8,6 +8,7 @@ import {
   calculateBuyOnlyTopUp,
   calculateRequiredMonthlyContribution,
   combineDcaComparisons,
+  estimateHistoricalAnnualizedReturn,
   projectLongTermDca,
   simulateDcaVsLumpSum,
 } from "../lib/investment-planning";
@@ -39,6 +40,20 @@ test("total-return history reinvests cash distributions", () => {
   const simulation = simulateDcaVsLumpSum(points, { monthlyAmount: 100 });
   assert.equal(simulation.curve[1].invested, 200);
   assert.equal(simulation.curve[1].dcaValue, 200);
+});
+
+test("historical annualized estimate uses total-return NAV and reports coverage", () => {
+  const estimate = estimateHistoricalAnnualizedReturn(
+    [
+      { date: "2023-07-01", nav: 1, totalReturnNav: 1 },
+      { date: "2026-07-01", nav: 1.1, totalReturnNav: 1.331 },
+    ],
+    3,
+  );
+  assert.equal(estimate.startDate, "2023-07-01");
+  assert.equal(estimate.endDate, "2026-07-01");
+  assert.ok(Math.abs(estimate.annualizedReturn - 0.1) < 0.001);
+  assert.equal(estimate.limitedByHistory, false);
 });
 
 test("buy-only top-up sends more money to the largest target deficit", () => {

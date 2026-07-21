@@ -258,6 +258,54 @@ function normalizedNavPoints(
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+export interface HistoricalAnnualizedReturnEstimate {
+  /** Annualized return calculated from the published total-return NAV path. */
+  annualizedReturn: number;
+  startDate: string;
+  endDate: string;
+  yearsCovered: number;
+  requestedYears: number;
+  limitedByHistory: boolean;
+}
+
+/**
+ * Estimate an annualized historical return from the latest available NAV.
+ * Total-return NAV is preferred so cash distributions are not mistaken for a
+ * loss. The result is a historical, net-NAV return—not a forecast.
+ */
+export function estimateHistoricalAnnualizedReturn(
+  rawPoints: Array<FundNavPoint & { totalReturnNav?: number }>,
+  requestedYears = 3,
+): HistoricalAnnualizedReturnEstimate {
+  if (!Number.isInteger(requestedYears) || requestedYears < 1 || requestedYears > 30)
+    throw new Error("历史收益率回看年限必须为 1 至 30 年");
+  const points = normalizedNavPoints(rawPoints);
+  if (points.length < 2) throw new Error("历史净值数据不足，无法估算年化收益率");
+
+  const end = points.at(-1)!;
+  const cutoff = new Date(`${end.date}T00:00:00Z`);
+  cutoff.setUTCFullYear(cutoff.getUTCFullYear() - requestedYears);
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const start = points.find((point) => point.date >= cutoffDate) ?? points[0];
+  const days =
+    (Date.parse(`${end.date}T00:00:00Z`) - Date.parse(`${start.date}T00:00:00Z`)) /
+    86_400_000;
+  if (!Number.isFinite(days) || days < 30)
+    throw new Error("历史区间少于 30 天，无法估算年化收益率");
+  const yearsCovered = days / 365;
+  const annualizedReturn = Math.pow(end.nav / start.nav, 1 / yearsCovered) - 1;
+  if (!Number.isFinite(annualizedReturn))
+    throw new Error("历史净值无法计算年化收益率");
+  return {
+    annualizedReturn,
+    startDate: start.date,
+    endDate: end.date,
+    yearsCovered,
+    requestedYears,
+    limitedByHistory: yearsCovered + 1 / 365 < requestedYears,
+  };
+}
+
 function monthIndex(date: string) {
   return Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
 }
