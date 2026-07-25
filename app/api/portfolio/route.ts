@@ -17,6 +17,7 @@ import {
   calculateTradingFeeUnits,
   feeRuleFromInput,
 } from "@/lib/fees";
+import { estimateFundConfirmationDate } from "@/lib/confirmation-date";
 import { fetchLatestFundNav, fetchLiveFundData } from "@/lib/fund-data";
 import {
   describeUnsupportedStockCode,
@@ -740,6 +741,67 @@ async function resolveInvestmentInstrument(
   throw new Error(describeUnsupportedStockCode(code));
 }
 
+/**
+ * Resolve an off-exchange fund order in the same order a transfer agent does:
+ * first determine the valuation day, then query that exact day’s published
+ * NAV.  A prior-day price is returned only as context and is never marked as
+ * usable for automatic transaction entry.
+ */
+async function resolveFundOrderLifecycle(
+  d1: D1Database,
+  codeInput: string,
+  orderDate: string,
+  orderTime: string,
+  preferredProductType: PreferredProductType = "FUND",
+) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(orderDate))
+    throw new Error("请选择有效的下单日期");
+  const product = await resolveInvestmentInstrument(
+    d1,
+    codeInput,
+    "",
+    preferredProductType,
+  );
+  const instrument = product.instrument;
+  if (!instrument || !["FUND", "ETF"].includes(instrument.product_type))
+    throw new Error("确认净值仅适用于基金和 ETF");
+
+  const confirmationBusinessDays =
+    product.confirmationBusinessDays ??
+    (instrument.product_type === "ETF" ? 0 : 1);
+  const lifecycle = estimateFundConfirmationDate(orderDate, {
+    businessDays: confirmationBusinessDays,
+    tradeTime: orderTime,
+    isExchangeTraded: instrument.product_type === "ETF",
+  });
+  const quote = await resolveInvestmentInstrument(
+    d1,
+    codeInput,
+    lifecycle.acceptedDate,
+    preferredProductType,
+  );
+  const isExchangeTraded = instrument.product_type === "ETF";
+  const exactNavPublished = quote.quoteIsExact === true && quote.quoteNav > 0;
+  return {
+    ...quote,
+    lifecycle,
+    valuationDate: lifecycle.acceptedDate,
+    confirmationRule: isExchangeTraded
+      ? "场内 ETF：以券商成交回报的实际成交价为准"
+      : `场外基金：受理日（T）净值，预计 T+${confirmationBusinessDays} 个交易日确认`,
+    navStatus: isExchangeTraded
+      ? "EXCHANGE_TRADE"
+      : exactNavPublished
+        ? "PUBLISHED_EXACT"
+        : "PENDING_PUBLICATION",
+    canAutofillNav: !isExchangeTraded && exactNavPublished,
+    fallbackNav:
+      !exactNavPublished && quote.quoteNav > 0
+        ? { value: quote.quoteNav, date: quote.quoteNavDate }
+        : null,
+  };
+}
+
 async function lookupStoredInstrument(
   d1: D1Database,
   instrument: InstrumentRow,
@@ -1198,6 +1260,23 @@ export async function POST(request: Request) {
         preferredProductType,
       );
       return Response.json(lookedUp);
+    }
+
+    if (action === "resolveFundOrderLifecycle") {
+      const preferredProductType = parsePreferredProductType(
+        body.preferredProductType,
+      );
+      if (preferredProductType === "STOCK")
+        throw new Error("股票请以券商成交回报的实际成交价为准");
+      return Response.json(
+        await resolveFundOrderLifecycle(
+          d1,
+          String(body.code ?? ""),
+          String(body.orderDate ?? ""),
+          String(body.orderTime ?? ""),
+          preferredProductType === "AUTO" ? "FUND" : preferredProductType,
+        ),
+      );
     }
 
     if (action === "resolveInstrument") {

@@ -43,3 +43,13 @@ test("exchange traded products keep the trade date", () => {
   });
   assert.equal(result.confirmationDate, "2026-07-17");
 });
+
+test("mainland market holidays use the published market closure calendar", () => {
+  const result = estimateFundConfirmationDate("2026-10-01", {
+    businessDays: 1,
+    tradeTime: "10:00",
+  });
+  assert.equal(result.acceptedDate, "2026-10-08");
+  assert.equal(result.confirmationDate, "2026-10-09");
+  assert.equal(result.calendarCovered, true);
+});

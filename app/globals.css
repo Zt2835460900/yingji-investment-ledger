@@ -2595,6 +2595,23 @@ td small {
   box-shadow: 0 2px 7px rgba(30, 40, 70, 0.09);
   font-weight: 700;
 }
+.quick-entry-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: -7px 0 14px;
+  padding: 9px 10px;
+  color: #1c7860;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.5;
+  border-radius: 9px;
+  background: #eaf8f2;
+}
+.quick-entry-notice svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2630,6 +2647,57 @@ td small {
 .form-grid small {
   color: #9aa2b3;
   font-size: 8px;
+}
+.nav-confirmation-card {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid #d9e2fb;
+  border-radius: 11px;
+  background: #f7f9ff;
+}
+.nav-confirmation-card > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px;
+  border-right: 1px solid #dfe6f8;
+}
+.nav-confirmation-card > div:last-of-type {
+  border-right: 0;
+}
+.nav-confirmation-card span {
+  color: #5e6d91;
+  font-size: 9px;
+  font-weight: 700;
+}
+.nav-confirmation-card strong {
+  color: #1d2b4b;
+  font-size: 13px;
+  line-height: 1.15;
+}
+.nav-confirmation-card small {
+  color: #74819c;
+  font-size: 8px;
+  line-height: 1.45;
+}
+.nav-confirmation-card p {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 11px;
+  border-top: 1px solid #dfe6f8;
+  font-size: 9px;
+  font-weight: 700;
+}
+.nav-confirmation-card .is-published {
+  color: #167e61;
+  background: #e9f8f1;
+}
+.nav-confirmation-card .is-pending {
+  color: #9a6410;
+  background: #fff6e5;
 }
 .form-grid .lookup-button {
   width: max-content;
@@ -3861,6 +3929,41 @@ td small {
   background: #fff7f8;
   cursor: pointer;
 }
+.quick-holding-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 11px;
+}
+.quick-holding-actions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 12px;
+  color: #2f58d7;
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid #cbd7ff;
+  border-radius: 8px;
+  background: #f4f6ff;
+  cursor: pointer;
+}
+.quick-holding-actions button:hover {
+  color: #173da7;
+  border-color: #9db4ff;
+  background: #eaf0ff;
+}
+.quick-holding-actions .quick-redeem-button {
+  color: #986314;
+  border-color: #f1d29f;
+  background: #fff8eb;
+}
+.quick-holding-actions .quick-redeem-button:hover {
+  color: #784709;
+  border-color: #e7b96e;
+  background: #fff1d8;
+}
 .delete-holding-button:hover:not(:disabled) {
   color: #a92c3a;
   border-color: #e8aeb6;
@@ -3872,6 +3975,14 @@ td small {
 }
 
 @media (max-width: 680px) {
+  .quick-holding-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .quick-holding-actions button {
+    min-height: 40px;
+    font-size: 13px;
+  }
   .delete-holding-button {
     width: 100%;
     min-height: 44px;
@@ -7622,6 +7733,18 @@ td small {
 }
 
 @media (max-width: 560px) {
+  .nav-confirmation-card {
+    grid-template-columns: 1fr;
+  }
+  .nav-confirmation-card > div {
+    grid-template-columns: 115px 1fr;
+    align-items: baseline;
+    border-right: 0;
+    border-bottom: 1px solid #dfe6f8;
+  }
+  .nav-confirmation-card > div small {
+    grid-column: 2;
+  }
   .overview-page > .hero-balance {
     grid-template-rows: auto auto 74px;
     padding-bottom: 12px;

@@ -67,7 +67,6 @@ import {
   accountInstrumentDeletionSuccess,
   type AccountInstrumentDeletionCounts,
 } from "@/lib/account-instrument-deletion";
-import { estimateFundConfirmationDate } from "@/lib/confirmation-date";
 
 type View =
   | "overview"
@@ -79,6 +78,13 @@ type View =
   | "analytics"
   | "data";
 type Modal = "entry" | "account" | "instrument" | "plan" | "price" | null;
+type EntryPreset = {
+  accountId: number;
+  instrumentId: number;
+  code: string;
+  productType: "FUND" | "ETF" | "STOCK";
+  kind: "BUY" | "SELL";
+};
 
 interface PortfolioData {
   metrics: {
@@ -512,6 +518,7 @@ export function InvestmentDashboard() {
   const [data, setData] = useState<PortfolioData | null>(null);
   const [view, setView] = useState<View>("overview");
   const [modal, setModal] = useState<Modal>(null);
+  const [entryPreset, setEntryPreset] = useState<EntryPreset | null>(null);
   const [editingPlan, setEditingPlan] = useState<
     PortfolioData["plans"][number] | null
   >(null);
@@ -528,6 +535,10 @@ export function InvestmentDashboard() {
     setView(next);
     window.history.replaceState(null, "", `#${next}`);
     setMobileMenu(false);
+  };
+  const openEntry = (preset: EntryPreset | null = null) => {
+    setEntryPreset(preset);
+    setModal("entry");
   };
 
   const syncFunds = useCallback(async (force = false, announce = false) => {
@@ -650,7 +661,7 @@ export function InvestmentDashboard() {
     view === "overview" ? (
       <Overview
         data={data}
-        onEntry={() => setModal("entry")}
+        onEntry={() => openEntry()}
         onSync={() => void syncFunds(true, true)}
         syncing={navSyncing}
         onNavigate={navigateView}
@@ -659,6 +670,7 @@ export function InvestmentDashboard() {
       <Accounts
         data={data}
         onAccount={() => setModal("account")}
+        onQuickEntry={openEntry}
         busy={busy}
         onDelete={(id) =>
           void submit({ action: "deleteAccount", id }, "账户已删除")
@@ -679,7 +691,7 @@ export function InvestmentDashboard() {
         data={data}
         search={search}
         setSearch={setSearch}
-        onEntry={() => setModal("entry")}
+        onEntry={() => openEntry()}
         onDelete={(id) =>
           void submit({ action: "deleteEntry", id }, "流水已删除")
         }
@@ -785,7 +797,7 @@ export function InvestmentDashboard() {
             </span>
             <button
               className="primary-button"
-              onClick={() => setModal("entry")}
+              onClick={() => openEntry()}
             >
               <Plus size={18} />
               记一笔
@@ -822,11 +834,13 @@ export function InvestmentDashboard() {
         <ModalForm
           type={modal}
           data={data}
+          entryPreset={entryPreset}
           editingPlan={editingPlan}
           busy={busy}
           error={error}
           onClose={() => {
             setModal(null);
+            setEntryPreset(null);
             setEditingPlan(null);
             setError("");
           }}
@@ -1319,12 +1333,14 @@ function PanelTitle({
 function Accounts({
   data,
   onAccount,
+  onQuickEntry,
   onDelete,
   onDeleteInstrument,
   busy,
 }: {
   data: PortfolioData;
   onAccount: () => void;
+  onQuickEntry: (preset: EntryPreset) => void;
   onDelete: (id: number) => void;
   onDeleteInstrument: (accountId: number, instrumentId: number) => void;
   busy: boolean;
@@ -1547,6 +1563,43 @@ function Accounts({
                               ? `当前净值还需上涨 ${(position.toBreakEvenRate * 100).toFixed(2)}% 回本`
                               : `当前价格高于回本线 ${Math.abs(position.toBreakEvenRate * 100).toFixed(2)}%`}
                         </small>
+                      </div>
+                      <div className="quick-holding-actions">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onQuickEntry({
+                              accountId: account.id,
+                              instrumentId: position.instrumentId,
+                              code: position.code,
+                              productType:
+                                data.instruments.find(
+                                  (item) => item.id === position.instrumentId,
+                                )?.product_type ?? "FUND",
+                              kind: "BUY",
+                            })
+                          }
+                        >
+                          <Plus size={14} /> 追加
+                        </button>
+                        <button
+                          type="button"
+                          className="quick-redeem-button"
+                          onClick={() =>
+                            onQuickEntry({
+                              accountId: account.id,
+                              instrumentId: position.instrumentId,
+                              code: position.code,
+                              productType:
+                                data.instruments.find(
+                                  (item) => item.id === position.instrumentId,
+                                )?.product_type ?? "FUND",
+                              kind: "SELL",
+                            })
+                          }
+                        >
+                          赎回 / 卖出
+                        </button>
                       </div>
                       <button
                         type="button"
@@ -3142,6 +3195,7 @@ function LoginSecurityCard() {
 function ModalForm({
   type,
   data,
+  entryPreset,
   editingPlan,
   busy,
   error,
@@ -3150,6 +3204,7 @@ function ModalForm({
 }: {
   type: Exclude<Modal, null>;
   data: PortfolioData;
+  entryPreset: EntryPreset | null;
   editingPlan: PortfolioData["plans"][number] | null;
   busy: boolean;
   error: string;
@@ -3164,9 +3219,11 @@ function ModalForm({
     ? matchingAccount(data.accounts, initialPlanInstrument, data.holdings)
     : null;
   const [form, setForm] = useState<Record<string, string>>({
-    kind: "BUY",
+    kind: type === "entry" ? (entryPreset?.kind ?? "BUY") : "BUY",
     accountId: String(
-      type === "plan"
+      type === "entry" && entryPreset
+        ? entryPreset.accountId
+        : type === "plan"
         ? (editingPlan?.account_id ??
             initialPlanAccount?.id ??
             data.accounts[0]?.id ??
@@ -3174,16 +3231,23 @@ function ModalForm({
         : (data.accounts[0]?.id ?? ""),
     ),
     instrumentId: String(
-      type === "plan"
+      type === "entry" && entryPreset
+        ? entryPreset.instrumentId
+        : type === "plan"
         ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
         : (data.instruments[0]?.id ?? ""),
     ),
     instrumentCode:
-      type === "plan"
+      type === "entry" && entryPreset
+        ? entryPreset.code
+        : type === "plan"
         ? (initialPlanInstrument?.code ?? "")
         : (data.instruments[0]?.code ?? ""),
     preferredProductType:
-      initialPlanInstrument?.product_type === "STOCK" ? "STOCK" : "FUND",
+      entryPreset?.productType === "STOCK" ||
+      initialPlanInstrument?.product_type === "STOCK"
+        ? "STOCK"
+        : "FUND",
     tradeDate: today,
     tradeTime: shanghaiTimeForInput(),
     confirmationDate: "",
@@ -3224,6 +3288,16 @@ function ModalForm({
   const [confirmationBusinessDays, setConfirmationBusinessDays] = useState<
     number | null
   >(null);
+  const [orderLifecycle, setOrderLifecycle] = useState<{
+    acceptedDate: string;
+    confirmationDate: string;
+    cutoffPassed: boolean;
+    rolledFromNonBusinessDay: boolean;
+    calendarCovered: boolean;
+  } | null>(null);
+  const [navEntryStatus, setNavEntryStatus] = useState<
+    "PUBLISHED_EXACT" | "PENDING_PUBLICATION" | "EXCHANGE_TRADE" | ""
+  >("");
   const [confirmationIsAuto, setConfirmationIsAuto] = useState(true);
   const [priceIsAuto, setPriceIsAuto] = useState(true);
   const [amountIsAuto, setAmountIsAuto] = useState(true);
@@ -3232,6 +3306,7 @@ function ModalForm({
   const [resolvedInstrument, setResolvedInstrument] = useState<
     PortfolioData["instruments"][number] | null
   >(null);
+  const lastLookupCodeRef = useRef("");
   const selectedInstrument =
     (resolvedInstrument?.id === Number(form.instrumentId)
       ? resolvedInstrument
@@ -3243,6 +3318,12 @@ function ModalForm({
     const code = (form.instrumentCode ?? "").trim().toUpperCase();
     const preferredProductType =
       form.preferredProductType === "STOCK" ? "STOCK" : "FUND";
+    const isFundOrder =
+      preferredProductType === "FUND" && ["BUY", "SELL"].includes(form.kind);
+    const lookupCodeKey = `${preferredProductType}:${code}`;
+    const shouldRestoreAutomaticPrice =
+      lastLookupCodeRef.current !== lookupCodeKey;
+    lastLookupCodeRef.current = lookupCodeKey;
     const existing = data.instruments.find((item) =>
       instrumentCodeMatches(item, code, preferredProductType),
     );
@@ -3258,6 +3339,8 @@ function ModalForm({
           setQuoteMeta(null);
           setFundCategory("");
           setConfirmationBusinessDays(null);
+          setOrderLifecycle(null);
+          setNavEntryStatus("");
           setLookupNote(
             code
               ? preferredProductType === "STOCK"
@@ -3267,7 +3350,7 @@ function ModalForm({
           );
           return;
         }
-        setPriceIsAuto(true);
+        if (shouldRestoreAutomaticPrice) setPriceIsAuto(true);
         setLookupBusy(true);
         setLookupNote(
           `正在匹配${preferredProductType === "STOCK" ? "股票资料和价格" : `基金资料及 ${form.tradeDate} 对应净值`}…`,
@@ -3277,9 +3360,13 @@ function ModalForm({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              action: "lookupInstrument",
+              action: isFundOrder
+                ? "resolveFundOrderLifecycle"
+                : "lookupInstrument",
               code,
               tradeDate: form.tradeDate,
+              orderDate: form.tradeDate,
+              orderTime: form.tradeTime,
               preferredProductType,
             }),
             signal: controller.signal,
@@ -3297,6 +3384,15 @@ function ModalForm({
             confirmationBusinessDays?: number;
             quoteSource?: string;
             isLive?: boolean;
+            canAutofillNav?: boolean;
+            navStatus?: "PUBLISHED_EXACT" | "PENDING_PUBLICATION" | "EXCHANGE_TRADE";
+            lifecycle?: {
+              acceptedDate: string;
+              confirmationDate: string;
+              cutoffPassed: boolean;
+              rolledFromNonBusinessDay: boolean;
+              calendarCovered: boolean;
+            };
           };
           if (!response.ok || !result.instrument)
             throw new Error(result.error || "未查询到该基金代码");
@@ -3306,6 +3402,8 @@ function ModalForm({
             result.confirmationBusinessDays ??
               (result.instrument.product_type === "ETF" ? 0 : 1),
           );
+          setOrderLifecycle(result.lifecycle ?? null);
+          setNavEntryStatus(result.navStatus ?? "");
           setQuoteMeta(
             result.quoteNav && result.quoteNavDate
               ? {
@@ -3322,6 +3420,9 @@ function ModalForm({
             result.instrument,
             data.holdings,
           );
+          const canAutofillPrice = isFundOrder
+            ? result.canAutofillNav === true
+            : Boolean(result.quoteNav);
           setForm((current) =>
             current.instrumentCode === code
               ? {
@@ -3334,7 +3435,12 @@ function ModalForm({
                     current.kind === "BUY" && account
                       ? String(account.id)
                       : current.accountId,
-                  price: result.quoteNav ? String(result.quoteNav) : "",
+                  price:
+                    canAutofillPrice &&
+                    (priceIsAuto || shouldRestoreAutomaticPrice) &&
+                    result.quoteNav
+                      ? String(result.quoteNav)
+                      : current.price,
                   fee: "",
                   tax:
                     ["FUND", "ETF"].includes(
@@ -3346,7 +3452,9 @@ function ModalForm({
               : current,
           );
           setLookupNote(
-            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : `；${form.tradeDate} 之前暂无公开净值`}${account ? (form.kind === "BUY" ? `；保存买入后将把账户“${account.name}”改为正式产品名称` : `；账户已匹配为 ${account.name}`) : ""}`,
+            isFundOrder && result.navStatus === "PENDING_PUBLICATION"
+              ? `已匹配 ${result.instrument.name}；净值日为 ${result.lifecycle?.acceptedDate ?? form.tradeDate}，该日净值尚未公布，未自动填入。请等待公布或按确认单手动填写。`
+              : `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : ""}${account ? (form.kind === "BUY" ? `；保存买入后将把账户“${account.name}”改为正式产品名称` : `；账户已匹配为 ${account.name}`) : ""}`,
           );
         } catch (caught) {
           if (!controller.signal.aborted)
@@ -3371,6 +3479,8 @@ function ModalForm({
     form.kind,
     form.preferredProductType,
     form.tradeDate,
+    form.tradeTime,
+    priceIsAuto,
     type,
   ]);
   useEffect(() => {
@@ -3543,17 +3653,9 @@ function ModalForm({
         ? calculatedAmount.toFixed(2)
         : ""
       : (form.amount ?? "");
-  const confirmationEstimate =
-    confirmationBusinessDays !== null && form.tradeDate
-      ? estimateFundConfirmationDate(form.tradeDate, {
-          businessDays: confirmationBusinessDays,
-          tradeTime: form.tradeTime,
-          isExchangeTraded: selectedInstrument?.product_type === "ETF",
-        })
-      : null;
   const displayedConfirmationDate =
-    confirmationIsAuto && confirmationEstimate
-      ? confirmationEstimate.confirmationDate
+    confirmationIsAuto && orderLifecycle
+      ? orderLifecycle.confirmationDate
       : (form.confirmationDate ?? "");
   const displayedFee =
     feeIsAuto && form.kind === "BUY"
@@ -3794,6 +3896,12 @@ function ModalForm({
                   </button>
                 ))}
               </div>
+              {entryPreset && (
+                <div className="quick-entry-notice">
+                  <Check size={15} />
+                  已带入持仓产品、账户和交易方向；只需填写金额，净值公布后会自动带入，确认单可覆盖。
+                </div>
+              )}
               <div className="form-grid">
                 <Field label="账户">
                   <select
@@ -3999,7 +4107,7 @@ function ModalForm({
                               set("tradeTime", e.target.value);
                             }}
                           />
-                          <small>15:00 前通常按当日申请；15:00 起预计顺延至下一工作日。</small>
+                          <small>按中国时间判断：15:00 前通常按当日受理；15:00（含）后顺延。场外基金以受理日净值，不是下单日的任意历史净值。</small>
                         </Field>
                       )}
                       <Field label="份额确认日期">
@@ -4014,12 +4122,39 @@ function ModalForm({
                         />
                         <small>
                           {confirmationBusinessDays === null
-                            ? "匹配代码后自动估算，实际确认单可覆盖"
+                            ? "匹配代码后自动计算受理日、净值日与确认日；收到确认单后可直接覆盖。"
                             : selectedInstrument?.product_type === "ETF"
-                              ? "场内 ETF 按成交日记账；以券商成交回报为准。"
-                              : `预计：受理日 ${confirmationEstimate?.acceptedDate ?? "—"}，按 T+${confirmationBusinessDays} 工作日确认${confirmationEstimate?.cutoffPassed ? "（已过 15:00 截止）" : ""}。法定节假日及基金合同规则以确认单为准。`}
+                              ? "场内 ETF 按券商实际成交价和成交日记账，不使用基金确认规则。"
+                              : orderLifecycle
+                                ? `下单 → 受理/净值日 ${orderLifecycle.acceptedDate} → 预计确认 ${orderLifecycle.confirmationDate}${orderLifecycle.cutoffPassed ? "（已过 15:00 截止）" : ""}${orderLifecycle.rolledFromNonBusinessDay ? "（已避开休市日）" : ""}${orderLifecycle.calendarCovered ? "。已纳入 2026 交易所休市日。" : "。该年份暂按周末规则估算，确认单优先。"}`
+                                : "正在按基金规则计算确认链路…"}
                         </small>
                       </Field>
+                      {orderLifecycle &&
+                        selectedInstrument?.product_type === "FUND" && (
+                          <div className="nav-confirmation-card" role="status">
+                            <div>
+                              <span>① 下单</span>
+                              <strong>{form.tradeDate}</strong>
+                              <small>{form.tradeTime || "未填写时间"}</small>
+                            </div>
+                            <div>
+                              <span>② 受理 / 净值日</span>
+                              <strong>{orderLifecycle.acceptedDate}</strong>
+                              <small>以这一天的基金净值计算份额</small>
+                            </div>
+                            <div>
+                              <span>③ 份额确认</span>
+                              <strong>{orderLifecycle.confirmationDate}</strong>
+                              <small>到账后请以确认单覆盖</small>
+                            </div>
+                            <p className={navEntryStatus === "PUBLISHED_EXACT" ? "is-published" : "is-pending"}>
+                              {navEntryStatus === "PUBLISHED_EXACT"
+                                ? "已找到该净值日的公开净值，已自动带入"
+                                : "待该净值日公布：不使用上一日净值代填"}
+                            </p>
+                          </div>
+                        )}
                     </>
                   )}
                 {["BUY", "SELL"].includes(form.kind) && (
@@ -4057,13 +4192,17 @@ function ModalForm({
                         }}
                       />
                       <small>
-                        {quoteMeta && priceIsAuto
-                          ? `已按所选交易日期带入净值 ${quoteMeta.price.toFixed(6)}（${quoteMeta.date}${quoteMeta.isExact ? "，当日公布" : `，${quoteMeta.requestedDate} 前最近公布`}${quoteMeta.isLive ? "" : "，缓存"}）；成交确认单可覆盖`
-                          : quoteMeta
-                            ? "已使用手工净值；重新选择交易日期或输入代码可恢复自动带入"
-                            : selectedInstrument && !lookupBusy
-                              ? `所选日期 ${form.tradeDate} 之前暂无公开净值，请按成交确认单填写`
-                              : "输入代码后按所选交易日期自动匹配历史净值"}
+                        {navEntryStatus === "PENDING_PUBLICATION"
+                          ? `待公布：净值日 ${orderLifecycle?.acceptedDate ?? form.tradeDate} 尚无已发布净值，系统不会拿上一日净值冒充成交净值。收到确认单后可手动填写。${quoteMeta ? ` 仅供参考的上一已公布净值：${quoteMeta.price.toFixed(6)}（${quoteMeta.date}）。` : ""}`
+                          : navEntryStatus === "EXCHANGE_TRADE"
+                            ? "场内 ETF 的成交价格来自券商成交回报，不应自动替换为基金净值。"
+                            : quoteMeta && priceIsAuto
+                              ? `已带入净值 ${quoteMeta.price.toFixed(6)}（净值日 ${quoteMeta.date}，已公布）。确认单到账后如有差异可直接覆盖。`
+                              : quoteMeta
+                                ? "已使用确认单/手工净值；系统不会在刷新时覆盖它。"
+                                : selectedInstrument && !lookupBusy
+                                  ? "该净值日暂无公开数据，请等待净值公布或按确认单填写。"
+                                  : "输入代码后将按受理日查询对应的历史净值。"}
                       </small>
                     </Field>
                   </>
