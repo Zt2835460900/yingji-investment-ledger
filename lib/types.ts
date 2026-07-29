@@ -71,3 +71,21 @@ export interface TargetRow {
   target_bps: number;
   alert_bps: number;
 }
+
+export interface JournalRow {
+  id: number;
+  account_id: number | null;
+  instrument_id: number | null;
+  entry_date: string;
+  title: string;
+  decision: string;
+  mood: string;
+  thesis: string;
+  review_date: string;
+  review_note: string;
+  created_at: string;
+  updated_at: string;
+  account_name: string | null;
+  instrument_name: string | null;
+  instrument_code: string | null;
+}

@@ -122,6 +122,61 @@ export const allocationTargets = sqliteTable(
   (table) => [uniqueIndex("allocation_instrument_idx").on(table.instrumentId)],
 );
 
+export const investmentJournal = sqliteTable(
+  "investment_journal",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    accountId: integer("account_id"),
+    instrumentId: integer("instrument_id"),
+    entryDate: text("entry_date").notNull(),
+    title: text("title").notNull(),
+    decision: text("decision").notNull().default("REVIEW"),
+    mood: text("mood").notNull().default("CALM"),
+    thesis: text("thesis").notNull().default(""),
+    reviewDate: text("review_date").notNull().default(""),
+    reviewNote: text("review_note").notNull().default(""),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("investment_journal_date_idx").on(table.entryDate),
+    index("investment_journal_instrument_idx").on(table.instrumentId),
+  ],
+);
+
+export const paperAccounts = sqliteTable("paper_accounts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  initialCashUnits: integer("initial_cash_units").notNull(),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const paperTrades = sqliteTable(
+  "paper_trades",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    accountId: integer("account_id").notNull(),
+    instrumentId: integer("instrument_id").notNull(),
+    side: text("side").notNull(),
+    tradeDate: text("trade_date").notNull(),
+    quantityUnits: integer("quantity_units").notNull(),
+    priceUnits: integer("price_units").notNull(),
+    feeUnits: integer("fee_units").notNull().default(0),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("paper_trades_account_date_idx").on(table.accountId, table.tradeDate),
+  ],
+);
+
 export const appMeta = sqliteTable("app_meta", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

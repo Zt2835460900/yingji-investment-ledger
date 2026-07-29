@@ -33,6 +33,11 @@ export interface FundNavPoint {
   nav: number;
 }
 
+export interface FundHistoryPoint extends FundNavPoint {
+  dailyReturnPercent: number;
+  totalReturnNav: number;
+}
+
 export type FundNavSource = "OFFICIAL_EFUNDS" | "EASTMONEY";
 
 export interface FundNavQuote extends FundNavPoint {
@@ -40,6 +45,16 @@ export interface FundNavQuote extends FundNavPoint {
   source: FundNavSource;
   isOfficial: boolean;
   fetchedAt: string;
+}
+
+export interface FundNavHistory {
+  code: string;
+  points: FundHistoryPoint[];
+  source: "EASTMONEY";
+  sourceLabel: "天天基金";
+  returnMethod: "DIVIDEND_REINVESTED";
+  updatedAt: string;
+  latestDate: string;
 }
 
 export function selectFundNav(
@@ -83,7 +98,7 @@ export function parseEfundsOfficialNav(html: string): FundNavPoint | null {
   return { date, nav };
 }
 
-function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
+export function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
   const navStart = script.indexOf("var Data_netWorthTrend");
   const navEnd = navStart >= 0 ? script.indexOf("];", navStart) : -1;
   const navBlock =
@@ -102,6 +117,65 @@ function parseEastmoneyNavPoints(script: string): FundNavPoint[] {
   return points;
 }
 
+/**
+ * Build a synthetic total-return NAV from the provider's published daily
+ * return series. The daily return already includes cash distributions on the
+ * ex-dividend date; compounding it is equivalent to reinvesting distributions
+ * and avoids treating a dividend-related NAV drop as an investment loss.
+ */
+export function parseEastmoneyTotalReturnPoints(
+  script: string,
+): FundHistoryPoint[] {
+  const marker = "var Data_netWorthTrend";
+  const markerIndex = script.indexOf(marker);
+  const arrayStart = markerIndex >= 0 ? script.indexOf("[", markerIndex) : -1;
+  const arrayEnd = arrayStart >= 0 ? script.indexOf("];", arrayStart) : -1;
+  if (arrayStart < 0 || arrayEnd <= arrayStart) return [];
+  let rows: unknown;
+  try {
+    rows = JSON.parse(script.slice(arrayStart, arrayEnd + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(rows)) return [];
+  const normalized = rows
+    .map((row) => {
+      const value = row as Record<string, unknown>;
+      const timestamp = Number(value.x);
+      const nav = Number(value.y);
+      const dailyReturnPercent = Number(value.equityReturn);
+      const date = timestamp
+        ? new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        : "";
+      return { date, nav, dailyReturnPercent };
+    })
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.nav) &&
+        point.nav > 0 &&
+        Number.isFinite(point.dailyReturnPercent),
+    )
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter(
+      (point, index, ordered) =>
+        index === ordered.length - 1 || point.date !== ordered[index + 1].date,
+    );
+  let totalReturnNav = 0;
+  return normalized.map((point, index) => {
+    if (index === 0) totalReturnNav = point.nav;
+    else {
+      const factor = 1 + point.dailyReturnPercent / 100;
+      const previous = normalized[index - 1];
+      totalReturnNav *=
+        Number.isFinite(factor) && factor > 0
+          ? factor
+          : point.nav / previous.nav;
+    }
+    return { ...point, totalReturnNav };
+  });
+}
+
 export function parseEastmoneyLatestNav(script: string): FundNavPoint | null {
   return selectFundNav(parseEastmoneyNavPoints(script));
 }
@@ -117,6 +191,38 @@ async function fetchText(url: string, timeoutMs: number) {
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.text();
+}
+
+/**
+ * Load the published historical unit-NAV series for one six-digit fund code.
+ * The URL is constructed locally from the validated code, so callers cannot
+ * turn this helper into an arbitrary remote URL fetcher.
+ */
+export async function fetchFundNavHistory(
+  codeInput: string,
+): Promise<FundNavHistory> {
+  const code = codeInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("基金或 ETF 代码应为 6 位数字");
+  let script = "";
+  try {
+    script = await fetchText(
+      `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
+      8_000,
+    );
+  } catch {
+    throw new Error("历史净值数据源暂时不可用");
+  }
+  const points = parseEastmoneyTotalReturnPoints(script);
+  if (!points.length) throw new Error("未查询到该基金的历史净值");
+  return {
+    code,
+    points,
+    source: "EASTMONEY",
+    sourceLabel: "天天基金",
+    returnMethod: "DIVIDEND_REINVESTED",
+    updatedAt: new Date().toISOString(),
+    latestDate: points.at(-1)!.date,
+  };
 }
 
 /**

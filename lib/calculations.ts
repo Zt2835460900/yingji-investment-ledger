@@ -1,4 +1,5 @@
 import { MONEY_SCALE, PRICE_SCALE, QUANTITY_SCALE } from "./money";
+import { CASH_INSTRUMENT_ID } from "./allocation-targets";
 import type {
   AccountRow,
   InstrumentRow,
@@ -213,6 +214,16 @@ export function calculatePortfolio(
       const price = (priceRow?.price_units ?? 0) / PRICE_SCALE;
       const marketValue = item.quantity * price;
       const unrealized = marketValue - item.cost;
+      // The remaining moving-average book cost already contains historical
+      // buy fees. A partial sale reduces both quantity and cost in the same
+      // proportion, so this remains the per-unit price needed to recover the
+      // cost of the shares that are still held.
+      const breakEvenPrice = item.cost / item.quantity;
+      const toBreakEvenRate = price > 0 ? breakEvenPrice / price - 1 : null;
+      const breakEvenProgress =
+        breakEvenPrice > 0
+          ? Math.min(1, Math.max(0, price / breakEvenPrice))
+          : 1;
       return {
         ...item,
         accountName: accountById.get(item.accountId)?.name ?? "未知账户",
@@ -224,6 +235,9 @@ export function calculatePortfolio(
         marketValue,
         unrealized,
         returnRate: item.cost ? unrealized / item.cost : 0,
+        breakEvenPrice,
+        toBreakEvenRate,
+        breakEvenProgress,
       };
     });
 
@@ -433,6 +447,22 @@ export function calculatePortfolio(
 
   const allocatableCash = Math.max(0, cash);
   const allocationBase = securitiesValue + allocatableCash;
+  const savedCashTarget = targets.find(
+    (targetRow) => targetRow.instrument_id === CASH_INSTRUMENT_ID,
+  );
+  const hasProductTargets = targets.some(
+    (targetRow) => targetRow.instrument_id > CASH_INSTRUMENT_ID,
+  );
+  const productTargetTotalBps = targets.reduce(
+    (sum, targetRow) =>
+      sum +
+      (targetRow.instrument_id > CASH_INSTRUMENT_ID ? targetRow.target_bps : 0),
+    0,
+  );
+  const cashTargetBps =
+    savedCashTarget?.target_bps ??
+    (hasProductTargets ? Math.max(0, 10_000 - productTargetTotalBps) : 0);
+  const cashAlertBps = savedCashTarget?.alert_bps ?? 500;
   const allocation = holdings
     .filter((item) => item.marketValue > 0)
     .map((item) => {
@@ -452,22 +482,44 @@ export function calculatePortfolio(
         alert: Math.abs(drift) * 10_000 > (target?.alert_bps ?? 500),
       };
     });
-  if (allocatableCash > 0)
+  if (allocatableCash > 0 || cashTargetBps > 0) {
+    const actual = allocationBase ? allocatableCash / allocationBase : 0;
+    const targetRate = cashTargetBps / 10_000;
+    const drift = actual - targetRate;
     allocation.push({
-      instrumentId: 0,
+      instrumentId: CASH_INSTRUMENT_ID,
       name: "现金",
       value: allocatableCash,
-      actual: allocationBase ? allocatableCash / allocationBase : 0,
-      target: 0,
-      drift: allocationBase ? allocatableCash / allocationBase : 0,
-      alert: false,
+      actual,
+      target: targetRate,
+      drift,
+      alert:
+        (Boolean(savedCashTarget) || hasProductTargets) &&
+        Math.abs(drift) * 10_000 > cashAlertBps,
     });
+  }
 
-  const rankings = holdings
-    .map((item) => ({
+  const rankingByInstrument = new Map<
+    number,
+    { name: string; profit: number; cost: number; unrealized: number }
+  >();
+  for (const item of holdings) {
+    const current = rankingByInstrument.get(item.instrumentId) ?? {
       name: item.instrumentName,
-      profit: item.realized + item.unrealized + item.income,
-      returnRate: item.returnRate,
+      profit: 0,
+      cost: 0,
+      unrealized: 0,
+    };
+    current.profit += item.realized + item.unrealized + item.income;
+    current.cost += item.cost;
+    current.unrealized += item.unrealized;
+    rankingByInstrument.set(item.instrumentId, current);
+  }
+  const rankings = [...rankingByInstrument.values()]
+    .map((item) => ({
+      name: item.name,
+      profit: item.profit,
+      returnRate: item.cost > 0 ? item.unrealized / item.cost : 0,
     }))
     .sort((a, b) => b.returnRate - a.returnRate);
 
