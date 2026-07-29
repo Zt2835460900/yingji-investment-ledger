@@ -1455,6 +1455,17 @@ export async function POST(request: Request) {
         )
         .bind(name.slice(0, 50), String(body.color ?? "#5B7CFA"))
         .run();
+    } else if (action === "updateAccount") {
+      const accountId = positiveIntegerId(body.id, "账户");
+      const name = String(body.name ?? "").trim();
+      const color = String(body.color ?? "#5B7CFA").trim();
+      if (!name) throw new Error("账户名称不能为空");
+      if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error("账户颜色格式无效");
+      const updated = await d1
+        .prepare("UPDATE accounts SET name = ?, color = ? WHERE id = ?")
+        .bind(name.slice(0, 50), color, accountId)
+        .run();
+      if (!Number(updated.meta.changes ?? 0)) throw new Error("账户不存在");
     } else if (action === "deleteAccount") {
       const accountId = Number(body.id);
       if (!Number.isInteger(accountId) || accountId <= 0)
@@ -1586,6 +1597,108 @@ export async function POST(request: Request) {
             String(body.dataSource ?? "MANUAL"),
           )
           .run();
+    } else if (action === "updateInstrument") {
+      const instrumentId = positiveIntegerId(body.id, "产品");
+      const name = String(body.name ?? "").trim();
+      const code = String(body.code ?? "")
+        .trim()
+        .toUpperCase();
+      if (!name || !code) throw new Error("产品名称和代码不能为空");
+      const feeRule = feeRuleFromInput(body);
+      if (
+        feeRule.buyFeeBps < 0 ||
+        feeRule.buyFeeBps > 10_000 ||
+        feeRule.buyDiscountBps < 0 ||
+        feeRule.buyDiscountBps > 10_000 ||
+        feeRule.sellFeeBps < 0 ||
+        feeRule.sellFeeBps > 10_000 ||
+        feeRule.minFeeUnits < 0
+      )
+        throw new Error("费率必须在 0%–100% 之间，最低手续费不能为负数");
+      const updated = await d1
+        .prepare(
+          `UPDATE instruments
+           SET name = ?, code = ?, market = ?, asset_class = ?, currency = ?,
+               product_type = ?, buy_fee_bps = ?, buy_discount_bps = ?,
+               sell_fee_bps = ?, min_fee_units = ?, eastmoney_fee_bps = ?,
+               min_purchase_units = ?, redemption_fee_json = ?,
+               data_source = ?, source_updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(
+          name.slice(0, 80),
+          code.slice(0, 30),
+          String(body.market ?? "CN"),
+          String(body.assetClass ?? "OTHER"),
+          String(body.currency ?? "CNY"),
+          String(body.productType ?? "FUND"),
+          feeRule.buyFeeBps,
+          feeRule.buyDiscountBps,
+          feeRule.sellFeeBps,
+          feeRule.minFeeUnits,
+          Math.round(Number(body.eastmoneyFeePercent ?? 0) * 100),
+          decimalToUnits(body.minPurchase),
+          String(body.redemptionFeeJson ?? "[]"),
+          String(body.dataSource ?? "MANUAL"),
+          String(body.sourceUpdatedAt ?? ""),
+          instrumentId,
+        )
+        .run();
+      if (!Number(updated.meta.changes ?? 0)) throw new Error("产品不存在");
+    } else if (action === "deleteInstrument") {
+      const instrumentId = positiveIntegerId(body.id, "产品");
+      const [ledgerUsage, planUsage, journalUsage, paperUsage] =
+        await Promise.all([
+          d1
+            .prepare(
+              "SELECT COUNT(*) AS count FROM ledger_entries WHERE instrument_id = ?",
+            )
+            .bind(instrumentId)
+            .first<{ count: number }>(),
+          d1
+            .prepare(
+              "SELECT COUNT(*) AS count FROM recurring_plans WHERE instrument_id = ?",
+            )
+            .bind(instrumentId)
+            .first<{ count: number }>(),
+          d1
+            .prepare(
+              "SELECT COUNT(*) AS count FROM investment_journal WHERE instrument_id = ?",
+            )
+            .bind(instrumentId)
+            .first<{ count: number }>(),
+          d1
+            .prepare(
+              "SELECT COUNT(*) AS count FROM paper_trades WHERE instrument_id = ?",
+            )
+            .bind(instrumentId)
+            .first<{ count: number }>(),
+        ]);
+      const references = {
+        流水: Number(ledgerUsage?.count ?? 0),
+        定投: Number(planUsage?.count ?? 0),
+        复盘: Number(journalUsage?.count ?? 0),
+        模拟交易: Number(paperUsage?.count ?? 0),
+      };
+      const usedBy = Object.entries(references)
+        .filter(([, count]) => count > 0)
+        .map(([label, count]) => `${count} 条${label}`)
+        .join("、");
+      if (usedBy) throw new Error(`请先删除关联的${usedBy}`);
+      const existing = await d1
+        .prepare("SELECT id FROM instruments WHERE id = ?")
+        .bind(instrumentId)
+        .first<{ id: number }>();
+      if (!existing) throw new Error("产品不存在");
+      await d1.batch([
+        d1
+          .prepare("DELETE FROM prices WHERE instrument_id = ?")
+          .bind(instrumentId),
+        d1
+          .prepare("DELETE FROM allocation_targets WHERE instrument_id = ?")
+          .bind(instrumentId),
+        d1.prepare("DELETE FROM instruments WHERE id = ?").bind(instrumentId),
+      ]);
     } else if (action === "createPlan") {
       const accountId = Number(body.accountId);
       const instrumentId = Number(body.instrumentId);
@@ -1735,6 +1848,8 @@ export async function POST(request: Request) {
             );
         }),
       ]);
+    } else if (action === "clearTargets") {
+      await d1.prepare("DELETE FROM allocation_targets").run();
     } else if (action === "createJournal") {
       const journal = parseJournalPayload(body);
       await assertJournalReferences(d1, journal);
@@ -1807,16 +1922,36 @@ export async function POST(request: Request) {
         throw new Error("只有 6 位代码的基金或 ETF 支持自动同步");
       await syncFundInstrument(d1, instrumentId, instrument.code);
     } else if (action === "upsertPrice") {
+      const instrumentId = positiveIntegerId(body.instrumentId, "产品");
+      const priceUnits = decimalToUnits(body.price, PRICE_SCALE);
+      if (priceUnits <= 0) throw new Error("价格 / 净值必须大于 0");
       await d1
         .prepare(
           "INSERT INTO prices (instrument_id, price_date, price_units, source) VALUES (?, ?, ?, 'MANUAL') ON CONFLICT(instrument_id, price_date) DO UPDATE SET price_units = excluded.price_units, source = excluded.source",
         )
-        .bind(
-          Number(body.instrumentId),
-          isoDate(body.priceDate),
-          decimalToUnits(body.price, PRICE_SCALE),
-        )
+        .bind(instrumentId, isoDate(body.priceDate), priceUnits)
         .run();
+    } else if (action === "updatePrice") {
+      const priceId = positiveIntegerId(body.id, "估值记录");
+      const instrumentId = positiveIntegerId(body.instrumentId, "产品");
+      const priceUnits = decimalToUnits(body.price, PRICE_SCALE);
+      if (priceUnits <= 0) throw new Error("价格 / 净值必须大于 0");
+      const updated = await d1
+        .prepare(
+          `UPDATE prices
+           SET instrument_id = ?, price_date = ?, price_units = ?, source = 'MANUAL'
+           WHERE id = ?`,
+        )
+        .bind(instrumentId, isoDate(body.priceDate), priceUnits, priceId)
+        .run();
+      if (!Number(updated.meta.changes ?? 0)) throw new Error("估值记录不存在");
+    } else if (action === "deletePrice") {
+      const priceId = positiveIntegerId(body.id, "估值记录");
+      const deleted = await d1
+        .prepare("DELETE FROM prices WHERE id = ?")
+        .bind(priceId)
+        .run();
+      if (!Number(deleted.meta.changes ?? 0)) throw new Error("估值记录不存在");
     } else if (action === "importRows") {
       const rows = Array.isArray(body.rows)
         ? (body.rows.slice(0, 1000) as Array<Record<string, unknown>>)

@@ -152,6 +152,13 @@ interface PortfolioData {
     purchase_channel: string;
     fee_source: string;
   }>;
+  prices: Array<{
+    id: number;
+    instrument_id: number;
+    price_date: string;
+    price_units: number;
+    source: string;
+  }>;
   holdings: Array<{
     accountId: number;
     instrumentId: number;
@@ -515,8 +522,17 @@ export function InvestmentDashboard() {
   const [data, setData] = useState<PortfolioData | null>(null);
   const [view, setView] = useState<View>("overview");
   const [modal, setModal] = useState<Modal>(null);
+  const [editingAccount, setEditingAccount] = useState<
+    PortfolioData["accounts"][number] | null
+  >(null);
   const [editingEntry, setEditingEntry] = useState<
     PortfolioData["ledger"][number] | null
+  >(null);
+  const [editingInstrument, setEditingInstrument] = useState<
+    PortfolioData["instruments"][number] | null
+  >(null);
+  const [editingPrice, setEditingPrice] = useState<
+    PortfolioData["prices"][number] | null
   >(null);
   const [editingPlan, setEditingPlan] = useState<
     PortfolioData["plans"][number] | null
@@ -627,7 +643,10 @@ export function InvestmentDashboard() {
       if (!response.ok) throw new Error(result.error || "保存失败");
       setData(result);
       setModal(null);
+      setEditingAccount(null);
       setEditingEntry(null);
+      setEditingInstrument(null);
+      setEditingPrice(null);
       setEditingPlan(null);
       setToast(typeof success === "function" ? success(result) : success);
       window.setTimeout(() => setToast(""), 2600);
@@ -668,7 +687,14 @@ export function InvestmentDashboard() {
     ) : view === "accounts" ? (
       <Accounts
         data={data}
-        onAccount={() => setModal("account")}
+        onAccount={() => {
+          setEditingAccount(null);
+          setModal("account");
+        }}
+        onEdit={(account) => {
+          setEditingAccount(account);
+          setModal("account");
+        }}
         busy={busy}
         onDelete={(id) =>
           void submit({ action: "deleteAccount", id }, "账户已删除")
@@ -732,8 +758,28 @@ export function InvestmentDashboard() {
       <DataCenter
         data={data}
         onImport={() => fileInput.current?.click()}
-        onPrice={() => setModal("price")}
-        onInstrument={() => setModal("instrument")}
+        onPrice={() => {
+          setEditingPrice(null);
+          setModal("price");
+        }}
+        onEditPrice={(price) => {
+          setEditingPrice(price);
+          setModal("price");
+        }}
+        onDeletePrice={(id) =>
+          void submit({ action: "deletePrice", id }, "估值记录已删除")
+        }
+        onInstrument={() => {
+          setEditingInstrument(null);
+          setModal("instrument");
+        }}
+        onEditInstrument={(instrument) => {
+          setEditingInstrument(instrument);
+          setModal("instrument");
+        }}
+        onDeleteInstrument={(id) =>
+          void submit({ action: "deleteInstrument", id }, "产品已删除")
+        }
         submit={submit}
       />
     );
@@ -839,13 +885,19 @@ export function InvestmentDashboard() {
         <ModalForm
           type={modal}
           data={data}
+          editingAccount={editingAccount}
           editingEntry={editingEntry}
+          editingInstrument={editingInstrument}
+          editingPrice={editingPrice}
           editingPlan={editingPlan}
           busy={busy}
           error={error}
           onClose={() => {
             setModal(null);
+            setEditingAccount(null);
             setEditingEntry(null);
+            setEditingInstrument(null);
+            setEditingPrice(null);
             setEditingPlan(null);
             setError("");
           }}
@@ -1323,12 +1375,14 @@ function PanelTitle({
 function Accounts({
   data,
   onAccount,
+  onEdit,
   onDelete,
   onDeleteInstrument,
   busy,
 }: {
   data: PortfolioData;
   onAccount: () => void;
+  onEdit: (account: PortfolioData["accounts"][number]) => void;
   onDelete: (id: number) => void;
   onDeleteInstrument: (accountId: number, instrumentId: number) => void;
   busy: boolean;
@@ -1592,6 +1646,13 @@ function Accounts({
                   </div>
                   <p>该账户的买卖、费用和收益按移动加权成本独立核算。</p>
                   <div className="account-detail-actions">
+                    <button
+                      className="secondary-button"
+                      onClick={() => onEdit(account)}
+                    >
+                      <Pencil size={15} />
+                      编辑账户
+                    </button>
                     <button
                       className="text-danger"
                       onClick={() =>
@@ -2184,6 +2245,22 @@ function Allocation({
       setDraftNotice("");
     }
   };
+  const clearAllTargets = async () => {
+    if (
+      !confirm(
+        "确定清空全部配置目标？当前持仓和交易不会删除，只会移除目标比例与偏离提醒。",
+      )
+    )
+      return;
+    const saved = await submit(
+      { action: "clearTargets" },
+      "全部配置目标已清空",
+    );
+    if (saved) {
+      setDrafts({});
+      setDraftNotice("");
+    }
+  };
 
   const renderTargetRow = (row: (typeof targetRows)[number]) => {
     const { instrument, index, currentValue, currentPercent, target } = row;
@@ -2324,14 +2401,25 @@ function Allocation({
               20%。修改目标只用于计算和提醒，不会自动买卖。
             </p>
           </div>
-          <button
-            type="button"
-            className="secondary-button current-as-target-button"
-            disabled={data.metrics.totalAssets <= 0}
-            onClick={useCurrentHoldingsAsDraft}
-          >
-            按当前资产生成目标草稿
-          </button>
+          <div className="allocation-target-actions">
+            <button
+              type="button"
+              className="secondary-button current-as-target-button"
+              disabled={data.metrics.totalAssets <= 0}
+              onClick={useCurrentHoldingsAsDraft}
+            >
+              按当前资产生成目标草稿
+            </button>
+            <button
+              type="button"
+              className="text-danger"
+              disabled={!data.targets.length}
+              onClick={() => void clearAllTargets()}
+            >
+              <Trash2 size={15} />
+              清空目标
+            </button>
+          </div>
         </div>
         {legacyRows.length > 0 && heldWithoutSavedTarget.length > 0 && (
           <div className="target-diagnosis" role="note">
@@ -2806,13 +2894,21 @@ function DataCenter({
   data,
   onImport,
   onPrice,
+  onEditPrice,
+  onDeletePrice,
   onInstrument,
+  onEditInstrument,
+  onDeleteInstrument,
   submit,
 }: {
   data: PortfolioData;
   onImport: () => void;
   onPrice: () => void;
+  onEditPrice: (price: PortfolioData["prices"][number]) => void;
+  onDeletePrice: (id: number) => void;
   onInstrument: () => void;
+  onEditInstrument: (instrument: PortfolioData["instruments"][number]) => void;
+  onDeleteInstrument: (id: number) => void;
   submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
 }) {
   const [exporting, setExporting] = useState(false);
@@ -2977,10 +3073,16 @@ function DataCenter({
         </div>
       </section>
       <section className="panel instrument-panel">
-        <PanelTitle
-          title="产品与数据源"
-          subtitle="查看同步状态并更新真实基金数据"
-        />
+        <div className="panel-title-row">
+          <PanelTitle
+            title="产品资料管理"
+            subtitle="新增、编辑、同步或删除基金、股票与 ETF"
+          />
+          <button className="secondary-button" onClick={onInstrument}>
+            <Plus size={16} />
+            新增产品
+          </button>
+        </div>
         <div className="instrument-list">
           {data.instruments.map((instrument) => (
             <div key={instrument.id}>
@@ -2999,24 +3101,111 @@ function DataCenter({
                   第三方 {(instrument.eastmoney_fee_bps / 100).toFixed(2)}%
                 </span>
               </div>
-              <button
-                className="secondary-button"
-                disabled={
-                  !/^\d{6}$/.test(instrument.code) ||
-                  !["FUND", "ETF"].includes(instrument.product_type)
-                }
-                onClick={() =>
-                  void submit(
-                    { action: "syncInstrument", instrumentId: instrument.id },
-                    `${instrument.name} 已同步`,
-                  )
-                }
-              >
-                <RefreshCcw size={15} />
-                同步数据
-              </button>
+              <div className="data-row-actions">
+                <button
+                  className="icon-button"
+                  aria-label={`同步 ${instrument.name}`}
+                  title="同步数据"
+                  disabled={
+                    !/^\d{6}$/.test(instrument.code) ||
+                    !["FUND", "ETF"].includes(instrument.product_type)
+                  }
+                  onClick={() =>
+                    void submit(
+                      {
+                        action: "syncInstrument",
+                        instrumentId: instrument.id,
+                      },
+                      `${instrument.name} 已同步`,
+                    )
+                  }
+                >
+                  <RefreshCcw size={15} />
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label={`编辑 ${instrument.name}`}
+                  title="编辑产品"
+                  onClick={() => onEditInstrument(instrument)}
+                >
+                  <Pencil size={15} />
+                </button>
+                <button
+                  className="icon-button danger"
+                  aria-label={`删除 ${instrument.name}`}
+                  title="删除产品"
+                  onClick={() =>
+                    confirm(
+                      `确定删除产品“${instrument.name}”？存在流水、定投或复盘关联时系统会阻止删除。`,
+                    ) && onDeleteInstrument(instrument.id)
+                  }
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
             </div>
           ))}
+        </div>
+      </section>
+      <section className="panel instrument-panel">
+        <div className="panel-title-row">
+          <PanelTitle
+            title="净值与价格记录"
+            subtitle="手工校准历史估值；修改或删除后资产与收益会重新计算"
+          />
+          <button className="secondary-button" onClick={onPrice}>
+            <Plus size={16} />
+            新增估值
+          </button>
+        </div>
+        <div className="price-history-list">
+          {data.prices.slice(0, 40).map((price) => {
+            const instrument = data.instruments.find(
+              (item) => item.id === price.instrument_id,
+            );
+            return (
+              <div key={price.id}>
+                <div>
+                  <strong>{instrument?.name ?? "已删除产品"}</strong>
+                  <span>
+                    {instrument?.code ?? "—"} · {price.price_date}
+                  </span>
+                </div>
+                <div>
+                  <strong>¥{money(price.price_units / 1_000_000, 6)}</strong>
+                  <span>{price.source}</span>
+                </div>
+                <div className="data-row-actions">
+                  <button
+                    className="icon-button"
+                    aria-label={`编辑 ${instrument?.name ?? "产品"} ${price.price_date} 估值`}
+                    title="编辑估值"
+                    onClick={() => onEditPrice(price)}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    className="icon-button danger"
+                    aria-label={`删除 ${instrument?.name ?? "产品"} ${price.price_date} 估值`}
+                    title="删除估值"
+                    onClick={() =>
+                      confirm(
+                        `确定删除 ${instrument?.name ?? "该产品"} 在 ${price.price_date} 的估值记录？`,
+                      ) && onDeletePrice(price.id)
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {!data.prices.length && (
+            <EmptyState
+              title="暂无估值记录"
+              text="新增价格或净值后，会在这里显示并允许编辑。"
+            />
+          )}
         </div>
       </section>
     </div>
@@ -3199,7 +3388,10 @@ function LoginSecurityCard() {
 function ModalForm({
   type,
   data,
+  editingAccount,
   editingEntry,
+  editingInstrument,
+  editingPrice,
   editingPlan,
   busy,
   error,
@@ -3208,7 +3400,10 @@ function ModalForm({
 }: {
   type: Exclude<Modal, null>;
   data: PortfolioData;
+  editingAccount: PortfolioData["accounts"][number] | null;
   editingEntry: PortfolioData["ledger"][number] | null;
+  editingInstrument: PortfolioData["instruments"][number] | null;
+  editingPrice: PortfolioData["prices"][number] | null;
   editingPlan: PortfolioData["plans"][number] | null;
   busy: boolean;
   error: string;
@@ -3240,9 +3435,11 @@ function ModalForm({
     instrumentId: String(
       type === "entry" && editingEntry
         ? (editingEntry.instrument_id ?? "")
-        : type === "plan"
-          ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
-          : (data.instruments[0]?.id ?? ""),
+        : type === "price" && editingPrice
+          ? editingPrice.instrument_id
+          : type === "plan"
+            ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
+            : (data.instruments[0]?.id ?? ""),
     ),
     instrumentCode:
       type === "entry" && editingEntry
@@ -3260,8 +3457,12 @@ function ModalForm({
     quantity: editingEntry
       ? String(editingEntry.quantity_units / 1_000_000)
       : "",
-    price: editingEntry ? String(editingEntry.price_units / 1_000_000) : "",
-    priceDate: today,
+    price: editingEntry
+      ? String(editingEntry.price_units / 1_000_000)
+      : editingPrice
+        ? String(editingPrice.price_units / 1_000_000)
+        : "",
+    priceDate: editingPrice?.price_date ?? today,
     nextDate: editingPlan?.next_date ?? today,
     dayOfMonth: String(editingPlan?.day_of_month ?? 5),
     amount: editingEntry
@@ -3273,23 +3474,37 @@ function ModalForm({
     tax: editingEntry ? String(editingEntry.tax_units / 10_000) : "",
     notes: editingEntry?.notes ?? "",
     externalRef: editingEntry?.external_ref ?? "",
-    market: "CN",
-    assetClass: "美国股票",
-    currency: "CNY",
-    productType: "FUND",
-    buyFeePercent: "0.15",
-    buyDiscountPercent: "100",
-    sellFeePercent: "0.50",
-    minFee: "0",
+    name: editingAccount?.name ?? editingInstrument?.name ?? "",
+    code: editingInstrument?.code ?? "",
+    market: editingInstrument?.market ?? "CN",
+    assetClass: editingInstrument?.asset_class ?? "美国股票",
+    currency: editingAccount?.currency ?? editingInstrument?.currency ?? "CNY",
+    productType: editingInstrument?.product_type ?? "FUND",
+    buyFeePercent: editingInstrument
+      ? String(editingInstrument.buy_fee_bps / 100)
+      : "0.15",
+    buyDiscountPercent: editingInstrument
+      ? String(editingInstrument.buy_discount_bps / 100)
+      : "100",
+    sellFeePercent: editingInstrument
+      ? String(editingInstrument.sell_fee_bps / 100)
+      : "0.50",
+    minFee: editingInstrument
+      ? String(editingInstrument.min_fee_units / 10_000)
+      : "0",
     purchaseChannel: editingEntry?.purchase_channel ?? "EASTMONEY",
-    eastmoneyFeePercent: "0",
-    minPurchase: "0",
-    redemptionFeeJson: "[]",
-    dataSource: "MANUAL",
-    sourceUpdatedAt: "",
+    eastmoneyFeePercent: editingInstrument
+      ? String(editingInstrument.eastmoney_fee_bps / 100)
+      : "0",
+    minPurchase: editingInstrument
+      ? String(editingInstrument.min_purchase_units / 10_000)
+      : "0",
+    redemptionFeeJson: editingInstrument?.redemption_fee_json ?? "[]",
+    dataSource: editingInstrument?.data_source ?? "MANUAL",
+    sourceUpdatedAt: editingInstrument?.source_updated_at ?? "",
     latestNav: "",
     latestNavDate: "",
-    color: "#5B7CFA",
+    color: editingAccount?.color ?? "#5B7CFA",
   });
   const set = (key: string, value: string) =>
     setForm({ ...form, [key]: value });
@@ -3324,7 +3539,7 @@ function ModalForm({
   );
   const [resolvedInstrument, setResolvedInstrument] = useState<
     PortfolioData["instruments"][number] | null
-  >(initialEntryInstrument);
+  >(initialEntryInstrument ?? null);
   const selectedInstrument =
     (resolvedInstrument?.id === Number(form.instrumentId)
       ? resolvedInstrument
@@ -3723,14 +3938,20 @@ function ModalForm({
         ? "编辑流水"
         : "新增流水"
       : type === "account"
-        ? "创建投资账户"
+        ? editingAccount
+          ? "编辑投资账户"
+          : "创建投资账户"
         : type === "instrument"
-          ? "新增基金 / 证券"
+          ? editingInstrument
+            ? "编辑基金 / 证券"
+            : "新增基金 / 证券"
           : type === "plan"
             ? editingPlan
               ? "编辑定投计划"
               : "新建定投计划"
-            : "更新价格 / 净值";
+            : editingPrice
+              ? "编辑价格 / 净值"
+              : "新增价格 / 净值";
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (type === "plan" && (lookupBusy || !selectedInstrument)) {
@@ -3745,18 +3966,27 @@ function ModalForm({
           ? "updateEntry"
           : "createEntry"
         : type === "account"
-          ? "createAccount"
+          ? editingAccount
+            ? "updateAccount"
+            : "createAccount"
           : type === "instrument"
-            ? "createInstrument"
+            ? editingInstrument
+              ? "updateInstrument"
+              : "createInstrument"
             : type === "plan"
               ? editingPlan
                 ? "updatePlan"
                 : "createPlan"
-              : "upsertPrice";
+              : editingPrice
+                ? "updatePrice"
+                : "upsertPrice";
     const payload: Record<string, unknown> = {
       action,
       ...form,
+      ...(editingAccount ? { id: editingAccount.id } : {}),
       ...(editingEntry ? { id: editingEntry.id } : {}),
+      ...(editingInstrument ? { id: editingInstrument.id } : {}),
+      ...(editingPrice ? { id: editingPrice.id } : {}),
       ...(editingPlan ? { id: editingPlan.id } : {}),
     };
     if (type === "entry")
@@ -3853,9 +4083,15 @@ function ModalForm({
           : form.kind === "BUY"
             ? "买入流水已保存，账户名称已同步为正式产品名称，收益已重算"
             : "流水已记入，收益已重算"
-        : editingPlan
-          ? "定投计划已更新"
-          : "已保存",
+        : type === "account" && editingAccount
+          ? "账户资料已更新"
+          : type === "instrument" && editingInstrument
+            ? "产品资料已更新"
+            : type === "price" && editingPrice
+              ? "估值记录已更新，资产与收益已重算"
+              : editingPlan
+                ? "定投计划已更新"
+                : "已保存",
     );
   };
   return (

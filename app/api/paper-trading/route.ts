@@ -199,7 +199,13 @@ export async function POST(request: Request) {
           )
           .bind(name.slice(0, 50), initialCashUnits)
           .run();
-      } else if (action === "createTrade") {
+      } else if (action === "createTrade" || action === "updateTrade") {
+        const tradeId = action === "updateTrade" ? Number(body.id) : null;
+        if (
+          action === "updateTrade" &&
+          (!Number.isInteger(tradeId) || Number(tradeId) <= 0)
+        )
+          throw new Error("模拟交易不存在");
         const accountId = Number(body.accountId);
         const instrumentId = Number(body.instrumentId);
         const side = String(body.side ?? "").toUpperCase();
@@ -230,9 +236,11 @@ export async function POST(request: Request) {
               .prepare(
                 `SELECT id, account_id, instrument_id, side, trade_date,
                       quantity_units, price_units, fee_units
-               FROM paper_trades WHERE account_id = ? ORDER BY trade_date, id`,
+               FROM paper_trades
+               WHERE account_id = ? AND (? IS NULL OR id <> ?)
+               ORDER BY trade_date, id`,
               )
-              .bind(accountId)
+              .bind(accountId, tradeId, tradeId)
               .all<PaperTradeRow>(),
             d1
               .prepare(
@@ -247,6 +255,15 @@ export async function POST(request: Request) {
           ]);
         if (!account) throw new Error("模拟账户不存在");
         if (!instrument) throw new Error("投资产品不存在");
+        if (tradeId) {
+          const existingTrade = await d1
+            .prepare("SELECT id, account_id FROM paper_trades WHERE id = ?")
+            .bind(tradeId)
+            .first<{ id: number; account_id: number }>();
+          if (!existingTrade) throw new Error("模拟交易不存在");
+          if (existingTrade.account_id !== accountId)
+            throw new Error("模拟交易不能移动到其他账户");
+        }
         const tradeDate = isoDate(body.tradeDate);
         if (tradeDate > shanghaiDate())
           throw new Error("模拟成交日期不能晚于今天");
@@ -266,22 +283,43 @@ export async function POST(request: Request) {
           instruments.results,
           prices.results,
         );
-        await d1
-          .prepare(
-            `INSERT INTO paper_trades
+        if (tradeId) {
+          await d1
+            .prepare(
+              `UPDATE paper_trades
+               SET account_id = ?, instrument_id = ?, side = ?, trade_date = ?,
+                   quantity_units = ?, price_units = ?, fee_units = ?
+               WHERE id = ?`,
+            )
+            .bind(
+              accountId,
+              instrumentId,
+              side,
+              candidate.trade_date,
+              quantityUnits,
+              priceUnits,
+              feeUnits,
+              tradeId,
+            )
+            .run();
+        } else {
+          await d1
+            .prepare(
+              `INSERT INTO paper_trades
            (account_id, instrument_id, side, trade_date, quantity_units, price_units, fee_units)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            accountId,
-            instrumentId,
-            side,
-            candidate.trade_date,
-            quantityUnits,
-            priceUnits,
-            feeUnits,
-          )
-          .run();
+            )
+            .bind(
+              accountId,
+              instrumentId,
+              side,
+              candidate.trade_date,
+              quantityUnits,
+              priceUnits,
+              feeUnits,
+            )
+            .run();
+        }
       } else if (action === "deleteTrade") {
         const tradeId = Number(body.id);
         if (!Number.isInteger(tradeId) || tradeId <= 0)

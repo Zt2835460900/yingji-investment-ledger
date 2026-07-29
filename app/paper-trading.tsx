@@ -8,6 +8,7 @@ import {
   Check,
   CircleDollarSign,
   FlaskConical,
+  Pencil,
   RefreshCcw,
   Search,
   Trash2,
@@ -137,6 +138,7 @@ export function PaperTrading({
   const [lookupNote, setLookupNote] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
+  const [editingTradeId, setEditingTradeId] = useState<number | null>(null);
   const orderSubmitLock = useRef(false);
   const lookupRequestRef = useRef(0);
   const lookupAbortRef = useRef<AbortController | null>(null);
@@ -212,6 +214,48 @@ export function PaperTrading({
     lookupCompletedSignatureRef.current = "";
     setLookupBusy(false);
   }, []);
+
+  const cancelTradeEdit = () => {
+    setEditingTradeId(null);
+    setMatched(null);
+    setLookupNote("");
+    setTrade({
+      side: "BUY",
+      code: "",
+      preferredProductType: "AUTO",
+      instrumentId: "",
+      tradeDate: today(),
+      amount: "",
+      quantity: "",
+      price: "",
+      fee: "",
+    });
+  };
+
+  const beginTradeEdit = (item: PaperAccount["trades"][number]) => {
+    const instrument = instruments.find(
+      (candidate) => candidate.id === item.instrumentId,
+    );
+    invalidateLookup();
+    setEditingTradeId(item.id);
+    setMatched(instrument ?? null);
+    setTrade({
+      side: item.side,
+      code: item.code,
+      preferredProductType: instrument?.product_type ?? "AUTO",
+      instrumentId: String(item.instrumentId),
+      tradeDate: item.tradeDate,
+      amount:
+        item.side === "BUY"
+          ? String(Math.round(item.quantity * item.price * 10000) / 10000)
+          : "",
+      quantity: item.side === "SELL" ? String(item.quantity) : "",
+      price: String(item.price),
+      fee: String(item.fee),
+    });
+    setLookupNote("已载入原模拟交易，可修改数量、价格、日期和手续费");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const lookup = useCallback(
     async (
@@ -861,50 +905,74 @@ export function PaperTrading({
                 <strong>¥{money(estimatedTotal)}</strong>
               </div>
             </div>
-            <button
-              className={`paper-submit ${trade.side === "BUY" ? "buy" : "sell"}`}
-              disabled={busy || lookupBusy || orderSubmitting || !orderIsValid}
-              onClick={async () => {
-                if (orderSubmitLock.current) return;
-                orderSubmitLock.current = true;
-                setOrderSubmitting(true);
-                setError("");
-                try {
-                  const instrument = await persistMatchedInstrument();
-                  const ok = await post(
-                    {
-                      action: "createTrade",
-                      accountId: active?.id,
-                      instrumentId: instrument.id,
-                      side: trade.side,
-                      tradeDate: trade.tradeDate,
-                      quantity: orderQuantityText,
-                      price: trade.price,
-                      fee: trade.fee,
-                    },
-                    `模拟${trade.side === "BUY" ? "买入" : "卖出"}已记录`,
-                  );
-                  if (ok)
-                    setTrade((current) => ({
-                      ...current,
-                      amount: current.side === "BUY" ? "" : current.amount,
-                      quantity: current.side === "SELL" ? "" : current.quantity,
-                      fee: "",
-                    }));
-                } catch (caught) {
-                  setError(
-                    caught instanceof Error ? caught.message : "模拟下单失败",
-                  );
-                } finally {
-                  orderSubmitLock.current = false;
-                  setOrderSubmitting(false);
+            <div className="paper-submit-actions">
+              {editingTradeId && (
+                <button
+                  className="paper-cancel-edit"
+                  disabled={busy || orderSubmitting}
+                  onClick={cancelTradeEdit}
+                >
+                  取消编辑
+                </button>
+              )}
+              <button
+                className={`paper-submit ${trade.side === "BUY" ? "buy" : "sell"}`}
+                disabled={
+                  busy || lookupBusy || orderSubmitting || !orderIsValid
                 }
-              }}
-            >
-              {busy || orderSubmitting
-                ? "提交中…"
-                : `确认模拟${trade.side === "BUY" ? "买入" : "卖出"}`}
-            </button>
+                onClick={async () => {
+                  if (orderSubmitLock.current) return;
+                  orderSubmitLock.current = true;
+                  setOrderSubmitting(true);
+                  setError("");
+                  try {
+                    const instrument = await persistMatchedInstrument();
+                    const ok = await post(
+                      {
+                        action: editingTradeId ? "updateTrade" : "createTrade",
+                        id: editingTradeId,
+                        accountId: active?.id,
+                        instrumentId: instrument.id,
+                        side: trade.side,
+                        tradeDate: trade.tradeDate,
+                        quantity: orderQuantityText,
+                        price: trade.price,
+                        fee: trade.fee,
+                      },
+                      editingTradeId
+                        ? "模拟交易已修改"
+                        : `模拟${trade.side === "BUY" ? "买入" : "卖出"}已记录`,
+                    );
+                    if (ok) {
+                      if (editingTradeId) {
+                        cancelTradeEdit();
+                      } else {
+                        setTrade((current) => ({
+                          ...current,
+                          amount: current.side === "BUY" ? "" : current.amount,
+                          quantity:
+                            current.side === "SELL" ? "" : current.quantity,
+                          fee: "",
+                        }));
+                      }
+                    }
+                  } catch (caught) {
+                    setError(
+                      caught instanceof Error ? caught.message : "模拟下单失败",
+                    );
+                  } finally {
+                    orderSubmitLock.current = false;
+                    setOrderSubmitting(false);
+                  }
+                }}
+              >
+                {busy || orderSubmitting
+                  ? "提交中…"
+                  : editingTradeId
+                    ? `保存模拟${trade.side === "BUY" ? "买入" : "卖出"}修改`
+                    : `确认模拟${trade.side === "BUY" ? "买入" : "卖出"}`}
+              </button>
+            </div>
           </div>
           {error && (
             <div className="paper-error">
@@ -1076,18 +1144,26 @@ export function PaperTrading({
                   </strong>
                   <span>手续费 ¥{money(item.fee)}</span>
                 </div>
-                <button
-                  aria-label="删除模拟交易"
-                  onClick={() =>
-                    confirm("确定删除这条模拟交易？只影响模拟账户。") &&
-                    void post(
-                      { action: "deleteTrade", id: item.id },
-                      "模拟交易已删除",
-                    )
-                  }
-                >
-                  <Trash2 size={16} />
-                </button>
+                <div className="paper-trade-actions">
+                  <button
+                    aria-label="编辑模拟交易"
+                    onClick={() => beginTradeEdit(item)}
+                  >
+                    <Pencil size={16} />
+                  </button>
+                  <button
+                    aria-label="删除模拟交易"
+                    onClick={() =>
+                      confirm("确定删除这条模拟交易？只影响模拟账户。") &&
+                      void post(
+                        { action: "deleteTrade", id: item.id },
+                        "模拟交易已删除",
+                      )
+                    }
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>

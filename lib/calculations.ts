@@ -569,6 +569,7 @@ export function calculatePortfolio(
     accounts: accountSummaries,
     instruments,
     ledger: orderedLedger.slice().reverse(),
+    prices: orderedPrices.slice().reverse(),
     holdings,
     plans: plans.map((plan) => ({
       ...plan,
