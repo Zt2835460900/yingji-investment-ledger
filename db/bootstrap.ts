@@ -28,6 +28,14 @@ const schemaStatements = [
     source_updated_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS fund_purchase_limits (
+    instrument_id INTEGER PRIMARY KEY,
+    purchase_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+    daily_limit_units INTEGER NOT NULL DEFAULT 0,
+    auto_sync INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'MANUAL',
+    source_updated_at TEXT NOT NULL DEFAULT ''
+  )`,
   `CREATE TABLE IF NOT EXISTS ledger_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   parseEastmoneyLatestNav,
   parseEfundsOfficialNav,
+  parseFundPurchaseLimit,
 } from "../lib/fund-data";
 
 test("parses the latest published NAV from the official E Fund page", () => {
@@ -42,4 +43,41 @@ test("selects the final valid point from the Eastmoney NAV script", () => {
     nav: 1.1501,
   });
   assert.equal(parseEastmoneyLatestNav("var Data_netWorthTrend = [];"), null);
+});
+
+test("parses a paused fund and its published daily purchase limit", () => {
+  const html = `
+    <div class="staticItem">
+      <span class="itemTit">交易状态：</span>
+      <span class="staticCell">暂停申购（<span>单日累计购买上限100.00元</span>）</span>
+      <span class="staticCell">开放赎回</span>
+    </div>
+  `;
+  assert.deepEqual(parseFundPurchaseLimit(html), {
+    status: "PAUSED",
+    dailyLimit: 100,
+    available: true,
+  });
+});
+
+test("distinguishes open subscription from exchange-only trading", () => {
+  assert.deepEqual(
+    parseFundPurchaseLimit(`
+      交易状态：</span><span class="staticCell">开放申购</span>
+      <span class="staticCell">开放赎回</span>
+    `),
+    { status: "OPEN", dailyLimit: 0, available: true },
+  );
+  assert.deepEqual(
+    parseFundPurchaseLimit(`
+      交易状态：</span><span class="staticCell">场内交易</span>
+      <span class="staticCell">场内交易</span>
+    `),
+    { status: "EXCHANGE_ONLY", dailyLimit: 0, available: true },
+  );
+  assert.deepEqual(parseFundPurchaseLimit("<main>暂无交易资料</main>"), {
+    status: "UNKNOWN",
+    dailyLimit: 0,
+    available: false,
+  });
 });

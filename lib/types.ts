@@ -28,6 +28,15 @@ export interface InstrumentRow {
   source_updated_at: string;
 }
 
+export interface FundPurchaseLimitRow {
+  instrument_id: number;
+  purchase_status: string;
+  daily_limit_units: number;
+  auto_sync: number;
+  source: string;
+  source_updated_at: string;
+}
+
 export interface LedgerRow {
   id: number;
   account_id: number;

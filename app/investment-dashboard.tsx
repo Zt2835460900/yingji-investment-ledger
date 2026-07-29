@@ -135,6 +135,14 @@ interface PortfolioData {
     data_source: string;
     source_updated_at: string;
   }>;
+  purchaseLimits: Array<{
+    instrument_id: number;
+    purchase_status: string;
+    daily_limit_units: number;
+    auto_sync: number;
+    source: string;
+    source_updated_at: string;
+  }>;
   ledger: Array<{
     id: number;
     account_id: number;
@@ -300,6 +308,25 @@ const money = (value: number, digits = 2) =>
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(value || 0);
+const purchaseStatusText = (status: string) =>
+  (
+    ({
+      OPEN: "开放申购",
+      LIMITED: "限额申购",
+      PAUSED: "暂停申购",
+      EXCHANGE_ONLY: "仅场内交易",
+      UNKNOWN: "状态待同步",
+    }) as Record<string, string>
+  )[status] ?? "状态待同步";
+const purchaseLimitText = (
+  limit: PortfolioData["purchaseLimits"][number] | undefined,
+) => {
+  if (!limit) return "申购限额待同步";
+  const amount = limit.daily_limit_units / 10_000;
+  return `${purchaseStatusText(limit.purchase_status)}${
+    amount > 0 ? ` · 单日 ¥${money(amount)}` : ""
+  } · ${limit.auto_sync ? "自动同步" : "手动维护"}`;
+};
 const compactMoney = (value: number) =>
   new Intl.NumberFormat("zh-CN", {
     notation: "compact",
@@ -571,7 +598,9 @@ export function InvestmentDashboard() {
         const synced = result.navSync?.synced ?? 0;
         const total = result.navSync?.total ?? 0;
         setToast(
-          total > 0 ? `净值已更新 ${synced}/${total}` : "暂无需要同步的基金",
+          total > 0
+            ? `基金净值与购入限额已更新 ${synced}/${total}`
+            : "暂无需要同步的基金",
         );
         window.setTimeout(() => setToast(""), 2600);
       }
@@ -990,7 +1019,7 @@ function Overview({
             </div>
             <div className="asset-sync-line" aria-live="polite">
               <span>
-                净值日期 {valuationRange} · {syncStatus} · 同步于{" "}
+                净值日期 {valuationRange} · {syncStatus} · 净值与限额同步于{" "}
                 {syncTimeText(data.navSync?.lastSuccessAt)}
                 {(data.missingPriceCount ?? 0) > 0
                   ? ` · ${data.missingPriceCount} 项待估值`
@@ -998,7 +1027,7 @@ function Overview({
               </span>
               <button type="button" onClick={onSync} disabled={syncing}>
                 <RefreshCcw size={14} className={syncing ? "spinning" : ""} />
-                {syncing ? "同步中" : "更新净值"}
+                {syncing ? "同步中" : "更新基金数据"}
               </button>
             </div>
           </div>
@@ -3084,67 +3113,81 @@ function DataCenter({
           </button>
         </div>
         <div className="instrument-list">
-          {data.instruments.map((instrument) => (
-            <div key={instrument.id}>
-              <div>
-                <strong>{instrument.name}</strong>
-                <span>
-                  {instrument.code} · {instrument.product_type} ·{" "}
-                  {instrument.data_source}
-                </span>
+          {data.instruments.map((instrument) => {
+            const purchaseLimit = data.purchaseLimits.find(
+              (item) => item.instrument_id === instrument.id,
+            );
+            return (
+              <div key={instrument.id}>
+                <div>
+                  <strong>{instrument.name}</strong>
+                  <span>
+                    {instrument.code} · {instrument.product_type} ·{" "}
+                    {instrument.data_source}
+                  </span>
+                </div>
+                <div>
+                  <span>
+                    标准费率 {(instrument.buy_fee_bps / 100).toFixed(2)}%
+                  </span>
+                  <span>
+                    第三方 {(instrument.eastmoney_fee_bps / 100).toFixed(2)}%
+                  </span>
+                  <span
+                    className={
+                      purchaseLimit?.purchase_status === "PAUSED"
+                        ? "purchase-limit-state warning"
+                        : "purchase-limit-state"
+                    }
+                  >
+                    {purchaseLimitText(purchaseLimit)}
+                  </span>
+                </div>
+                <div className="data-row-actions">
+                  <button
+                    className="icon-button"
+                    aria-label={`同步 ${instrument.name}`}
+                    title="同步数据"
+                    disabled={
+                      !/^\d{6}$/.test(instrument.code) ||
+                      !["FUND", "ETF"].includes(instrument.product_type)
+                    }
+                    onClick={() =>
+                      void submit(
+                        {
+                          action: "syncInstrument",
+                          instrumentId: instrument.id,
+                        },
+                        `${instrument.name} 已同步`,
+                      )
+                    }
+                  >
+                    <RefreshCcw size={15} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label={`编辑 ${instrument.name}`}
+                    title="编辑产品"
+                    onClick={() => onEditInstrument(instrument)}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    className="icon-button danger"
+                    aria-label={`删除 ${instrument.name}`}
+                    title="删除产品"
+                    onClick={() =>
+                      confirm(
+                        `确定删除产品“${instrument.name}”？存在流水、定投或复盘关联时系统会阻止删除。`,
+                      ) && onDeleteInstrument(instrument.id)
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               </div>
-              <div>
-                <span>
-                  标准费率 {(instrument.buy_fee_bps / 100).toFixed(2)}%
-                </span>
-                <span>
-                  第三方 {(instrument.eastmoney_fee_bps / 100).toFixed(2)}%
-                </span>
-              </div>
-              <div className="data-row-actions">
-                <button
-                  className="icon-button"
-                  aria-label={`同步 ${instrument.name}`}
-                  title="同步数据"
-                  disabled={
-                    !/^\d{6}$/.test(instrument.code) ||
-                    !["FUND", "ETF"].includes(instrument.product_type)
-                  }
-                  onClick={() =>
-                    void submit(
-                      {
-                        action: "syncInstrument",
-                        instrumentId: instrument.id,
-                      },
-                      `${instrument.name} 已同步`,
-                    )
-                  }
-                >
-                  <RefreshCcw size={15} />
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label={`编辑 ${instrument.name}`}
-                  title="编辑产品"
-                  onClick={() => onEditInstrument(instrument)}
-                >
-                  <Pencil size={15} />
-                </button>
-                <button
-                  className="icon-button danger"
-                  aria-label={`删除 ${instrument.name}`}
-                  title="删除产品"
-                  onClick={() =>
-                    confirm(
-                      `确定删除产品“${instrument.name}”？存在流水、定投或复盘关联时系统会阻止删除。`,
-                    ) && onDeleteInstrument(instrument.id)
-                  }
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
       <section className="panel instrument-panel">
@@ -3420,6 +3463,11 @@ function ModalForm({
   const initialPlanAccount = initialPlanInstrument
     ? matchingAccount(data.accounts, initialPlanInstrument, data.holdings)
     : null;
+  const initialPurchaseLimit = editingInstrument
+    ? data.purchaseLimits.find(
+        (item) => item.instrument_id === editingInstrument.id,
+      )
+    : undefined;
   const [form, setForm] = useState<Record<string, string>>({
     kind: editingEntry?.kind ?? "BUY",
     accountId: String(
@@ -3499,6 +3547,11 @@ function ModalForm({
     minPurchase: editingInstrument
       ? String(editingInstrument.min_purchase_units / 10_000)
       : "0",
+    purchaseStatus: initialPurchaseLimit?.purchase_status ?? "UNKNOWN",
+    dailyPurchaseLimit: String(
+      (initialPurchaseLimit?.daily_limit_units ?? 0) / 10_000,
+    ),
+    purchaseLimitAutoSync: initialPurchaseLimit?.auto_sync === 0 ? "0" : "1",
     redemptionFeeJson: editingInstrument?.redemption_fee_json ?? "[]",
     dataSource: editingInstrument?.data_source ?? "MANUAL",
     sourceUpdatedAt: editingInstrument?.source_updated_at ?? "",
@@ -3545,6 +3598,11 @@ function ModalForm({
       ? resolvedInstrument
       : undefined) ??
     data.instruments.find((item) => item.id === Number(form.instrumentId));
+  const selectedPurchaseLimit = selectedInstrument
+    ? data.purchaseLimits.find(
+        (item) => item.instrument_id === selectedInstrument.id,
+      )
+    : undefined;
   useEffect(() => {
     if (type !== "entry" || !["BUY", "SELL", "DIVIDEND"].includes(form.kind))
       return;
@@ -3848,6 +3906,12 @@ function ModalForm({
   const grossPreview = amountIsAuto
     ? calculatedAmount
     : Number(form.amount || 0);
+  const selectedDailyPurchaseLimit =
+    (selectedPurchaseLimit?.daily_limit_units ?? 0) / 10_000;
+  const purchaseLimitNeedsAttention =
+    selectedPurchaseLimit?.purchase_status === "PAUSED" ||
+    (selectedDailyPurchaseLimit > 0 &&
+      grossPreview > selectedDailyPurchaseLimit);
   const baseFeeBps =
     form.kind === "BUY"
       ? form.purchaseChannel === "EASTMONEY"
@@ -3901,6 +3965,9 @@ function ModalForm({
         standardBuyFeeBps: number;
         eastmoneyBuyFeeBps: number;
         minPurchase: number;
+        purchaseStatus: string;
+        dailyPurchaseLimit: number;
+        purchaseLimitAvailable: boolean;
         latestNav: number;
         latestNavDate: string;
         redemptionTiers: unknown[];
@@ -3917,6 +3984,9 @@ function ModalForm({
         buyDiscountPercent: "100",
         eastmoneyFeePercent: String(result.eastmoneyBuyFeeBps / 100),
         minPurchase: String(result.minPurchase),
+        purchaseStatus: result.purchaseStatus,
+        dailyPurchaseLimit: String(result.dailyPurchaseLimit),
+        purchaseLimitAutoSync: "1",
         latestNav: String(result.latestNav),
         latestNavDate: result.latestNavDate,
         redemptionFeeJson: JSON.stringify(result.redemptionTiers),
@@ -3924,7 +3994,7 @@ function ModalForm({
         sourceUpdatedAt: result.updatedAt,
       }));
       setLookupNote(
-        `已同步：${result.fundCategory || result.productType} · ${result.assetClass}；净值 ${result.latestNav || "—"}（${result.latestNavDate || "暂无日期"}），标准申购费 ${(result.standardBuyFeeBps / 100).toFixed(2)}%，天天基金 ${(result.eastmoneyBuyFeeBps / 100).toFixed(2)}%`,
+        `已同步：${result.fundCategory || result.productType} · ${result.assetClass}；净值 ${result.latestNav || "—"}（${result.latestNavDate || "暂无日期"}），${purchaseStatusText(result.purchaseStatus)}${result.dailyPurchaseLimit > 0 ? `，单日上限 ¥${money(result.dailyPurchaseLimit)}` : ""}`,
       );
     } catch (caught) {
       setLookupNote(caught instanceof Error ? caught.message : "查询失败");
@@ -4317,6 +4387,24 @@ function ModalForm({
                             ? "采用同步的天天基金当前优惠费率"
                             : "请在手续费中填写该渠道成交账单的实际费用"}
                     </small>
+                    {form.kind === "BUY" &&
+                      form.preferredProductType === "FUND" &&
+                      selectedPurchaseLimit && (
+                        <small
+                          className={
+                            purchaseLimitNeedsAttention
+                              ? "purchase-limit-warning"
+                              : "purchase-limit-info"
+                          }
+                        >
+                          当前参考：
+                          {purchaseLimitText(selectedPurchaseLimit)}
+                          {selectedDailyPurchaseLimit > 0 &&
+                          grossPreview > selectedDailyPurchaseLimit
+                            ? `；本笔金额比同步上限高 ¥${money(grossPreview - selectedDailyPurchaseLimit)}，请核对实际渠道`
+                            : ""}
+                        </small>
+                      )}
                   </Field>
                 )}
                 <Field label="交易日期">
@@ -4595,6 +4683,40 @@ function ModalForm({
                   value={form.minPurchase}
                   onChange={(e) => set("minPurchase", e.target.value)}
                 />
+              </Field>
+              <Field label="当前申购状态">
+                <select
+                  value={form.purchaseStatus}
+                  onChange={(e) => set("purchaseStatus", e.target.value)}
+                >
+                  <option value="OPEN">开放申购</option>
+                  <option value="LIMITED">限额申购</option>
+                  <option value="PAUSED">暂停申购</option>
+                  <option value="EXCHANGE_ONLY">仅场内交易</option>
+                  <option value="UNKNOWN">状态待确认</option>
+                </select>
+              </Field>
+              <Field label="单日购入限额（元）">
+                <input
+                  required
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputMode="decimal"
+                  value={form.dailyPurchaseLimit}
+                  onChange={(e) => set("dailyPurchaseLimit", e.target.value)}
+                />
+                <small>没有明确限额时填写 0</small>
+              </Field>
+              <Field label="限额同步方式">
+                <select
+                  value={form.purchaseLimitAutoSync}
+                  onChange={(e) => set("purchaseLimitAutoSync", e.target.value)}
+                >
+                  <option value="1">自动同步</option>
+                  <option value="0">手动维护，不自动覆盖</option>
+                </select>
+                <small>发现平台数据有误时，可切换为手动维护</small>
               </Field>
               <Field label="卖出 / 赎回费率（%）">
                 <input

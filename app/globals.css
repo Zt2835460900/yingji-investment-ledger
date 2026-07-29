@@ -3244,6 +3244,19 @@ td small {
   color: var(--muted);
   font-size: 13px;
 }
+.instrument-list .purchase-limit-state {
+  color: #147758;
+  font-weight: 700;
+}
+.instrument-list .purchase-limit-state.warning,
+.purchase-limit-warning {
+  color: #b44b58;
+  font-weight: 750;
+}
+.purchase-limit-info {
+  color: #49658f;
+  font-weight: 650;
+}
 .data-row-actions {
   display: flex !important;
   grid-auto-flow: column;

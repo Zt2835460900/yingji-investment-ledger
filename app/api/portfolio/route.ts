@@ -38,6 +38,7 @@ import {
 } from "@/lib/money";
 import type {
   AccountRow,
+  FundPurchaseLimitRow,
   InstrumentRow,
   JournalRow,
   LedgerRow,
@@ -54,6 +55,76 @@ const instrumentColumns =
   "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
 
 const NAV_SYNC_COOLDOWN_MS = 2 * 60 * 1000;
+const fundPurchaseStatuses = new Set([
+  "OPEN",
+  "LIMITED",
+  "PAUSED",
+  "EXCHANGE_ONLY",
+  "UNKNOWN",
+]);
+
+async function upsertSyncedFundPurchaseLimit(
+  d1: D1Database,
+  instrumentId: number,
+  live: Awaited<ReturnType<typeof fetchLiveFundData>>,
+) {
+  if (!live.purchaseLimitAvailable) return;
+  await d1
+    .prepare(
+      `INSERT INTO fund_purchase_limits
+         (instrument_id, purchase_status, daily_limit_units, auto_sync, source, source_updated_at)
+       VALUES (?, ?, ?, 1, ?, ?)
+       ON CONFLICT(instrument_id) DO UPDATE SET
+         purchase_status = excluded.purchase_status,
+         daily_limit_units = excluded.daily_limit_units,
+         source = excluded.source,
+         source_updated_at = excluded.source_updated_at
+       WHERE fund_purchase_limits.auto_sync = 1`,
+    )
+    .bind(
+      instrumentId,
+      live.purchaseStatus,
+      decimalToUnits(live.dailyPurchaseLimit),
+      live.source,
+      live.updatedAt,
+    )
+    .run();
+}
+
+async function upsertManualFundPurchaseLimit(
+  d1: D1Database,
+  instrumentId: number,
+  body: Record<string, unknown>,
+) {
+  const purchaseStatus = String(body.purchaseStatus ?? "UNKNOWN").toUpperCase();
+  if (!fundPurchaseStatuses.has(purchaseStatus))
+    throw new Error("基金申购状态无效");
+  const dailyLimitUnits = decimalToUnits(body.dailyPurchaseLimit);
+  if (dailyLimitUnits < 0) throw new Error("基金单日购入限额不能为负数");
+  const autoSync =
+    body.purchaseLimitAutoSync === true ||
+    String(body.purchaseLimitAutoSync ?? "1") === "1";
+  await d1
+    .prepare(
+      `INSERT INTO fund_purchase_limits
+         (instrument_id, purchase_status, daily_limit_units, auto_sync, source, source_updated_at)
+       VALUES (?, ?, ?, ?, 'MANUAL', ?)
+       ON CONFLICT(instrument_id) DO UPDATE SET
+         purchase_status = excluded.purchase_status,
+         daily_limit_units = excluded.daily_limit_units,
+         auto_sync = excluded.auto_sync,
+         source = excluded.source,
+         source_updated_at = excluded.source_updated_at`,
+    )
+    .bind(
+      instrumentId,
+      purchaseStatus,
+      dailyLimitUnits,
+      autoSync ? 1 : 0,
+      new Date().toISOString(),
+    )
+    .run();
+}
 
 async function upsertSyncedPrice(
   d1: D1Database,
@@ -123,6 +194,7 @@ async function syncFundInstrument(
     .run();
   if (!Number(updated.meta.changes ?? 0))
     throw new Error("目标产品不是基金或 ETF，已拒绝同步基金资料");
+  await upsertSyncedFundPurchaseLimit(d1, instrumentId, live);
   if (live.latestNav && live.latestNavDate)
     await upsertSyncedPrice(
       d1,
@@ -144,6 +216,21 @@ async function syncFundInstrument(
       live.source,
     );
   return live;
+}
+
+async function syncFundCatalogAndNav(
+  d1: D1Database,
+  instrument: Pick<InstrumentRow, "id" | "code" | "name">,
+) {
+  const [catalog, latestNav] = await Promise.allSettled([
+    syncFundInstrument(d1, instrument.id, instrument.code),
+    syncLatestFundNav(d1, instrument),
+  ]);
+  if (catalog.status === "rejected" && latestNav.status === "rejected")
+    throw catalog.reason;
+  return {
+    isOfficial: latestNav.status === "fulfilled" && latestNav.value.isOfficial,
+  };
 }
 
 async function resolveFundInstrument(
@@ -211,6 +298,9 @@ async function resolveFundInstrument(
             : 1),
       quoteSource: live ? live.source : (cachedPrice?.source ?? "CACHED"),
       isLive: Boolean(live),
+      purchaseStatus: live?.purchaseStatus ?? "UNKNOWN",
+      dailyPurchaseLimit: live?.dailyPurchaseLimit ?? 0,
+      purchaseLimitAvailable: live?.purchaseLimitAvailable ?? false,
     };
   }
 
@@ -250,6 +340,7 @@ async function resolveFundInstrument(
     .bind(code)
     .first<InstrumentRow>();
   if (!instrument) throw new Error("基金资料保存失败");
+  await upsertSyncedFundPurchaseLimit(d1, instrument.id, live);
   if (live.latestNav && live.latestNavDate)
     await upsertSyncedPrice(
       d1,
@@ -282,6 +373,9 @@ async function resolveFundInstrument(
     confirmationBusinessDays: live.confirmationBusinessDays,
     quoteSource: live.source,
     isLive: true,
+    purchaseStatus: live.purchaseStatus,
+    dailyPurchaseLimit: live.dailyPurchaseLimit,
+    purchaseLimitAvailable: live.purchaseLimitAvailable,
   };
 }
 
@@ -432,6 +526,9 @@ async function lookupFundInstrument(
     matchedProductType: live.productType,
     feeNotice: "",
     persisted: Boolean(stored),
+    purchaseStatus: live.purchaseStatus,
+    dailyPurchaseLimit: live.dailyPurchaseLimit,
+    purchaseLimitAvailable: live.purchaseLimitAvailable,
   };
 }
 
@@ -827,6 +924,7 @@ async function loadPortfolio() {
     plans,
     targets,
     journal,
+    purchaseLimits,
     navSyncRows,
   ] = await Promise.all([
     d1
@@ -872,6 +970,14 @@ async function loadPortfolio() {
       )
       .all<JournalRow>(),
     d1
+      .prepare(
+        `SELECT instrument_id, purchase_status, daily_limit_units,
+                auto_sync, source, source_updated_at
+           FROM fund_purchase_limits
+           ORDER BY instrument_id`,
+      )
+      .all<FundPurchaseLimitRow>(),
+    d1
       .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
       .all<{ key: string; value: string }>(),
   ]);
@@ -885,6 +991,7 @@ async function loadPortfolio() {
       targets.results,
     ),
     journal: journal.results,
+    purchaseLimits: purchaseLimits.results,
     navSync: navSyncFromRows(navSyncRows.results),
   };
 }
@@ -1069,7 +1176,7 @@ export async function POST(request: Request) {
         const batch = await Promise.allSettled(
           syncable
             .slice(index, index + 3)
-            .map((instrument) => syncLatestFundNav(d1, instrument)),
+            .map((instrument) => syncFundCatalogAndNav(d1, instrument)),
         );
         for (const result of batch) {
           if (result.status === "fulfilled") {
@@ -1277,6 +1384,7 @@ export async function POST(request: Request) {
                 instrumentId,
               )
               .run();
+            await upsertSyncedFundPurchaseLimit(d1, instrumentId, live);
             if (live.latestNav && live.latestNavDate)
               await upsertSyncedPrice(
                 d1,
@@ -1585,6 +1693,8 @@ export async function POST(request: Request) {
         )
         .run();
       const newInstrumentId = Number(created.meta.last_row_id);
+      if (newInstrumentId)
+        await upsertManualFundPurchaseLimit(d1, newInstrumentId, body);
       if (newInstrumentId && body.latestNav && body.latestNavDate)
         await d1
           .prepare(
@@ -1645,6 +1755,7 @@ export async function POST(request: Request) {
         )
         .run();
       if (!Number(updated.meta.changes ?? 0)) throw new Error("产品不存在");
+      await upsertManualFundPurchaseLimit(d1, instrumentId, body);
     } else if (action === "deleteInstrument") {
       const instrumentId = positiveIntegerId(body.id, "产品");
       const [ledgerUsage, planUsage, journalUsage, paperUsage] =
@@ -1696,6 +1807,9 @@ export async function POST(request: Request) {
           .bind(instrumentId),
         d1
           .prepare("DELETE FROM allocation_targets WHERE instrument_id = ?")
+          .bind(instrumentId),
+        d1
+          .prepare("DELETE FROM fund_purchase_limits WHERE instrument_id = ?")
           .bind(instrumentId),
         d1.prepare("DELETE FROM instruments WHERE id = ?").bind(instrumentId),
       ]);

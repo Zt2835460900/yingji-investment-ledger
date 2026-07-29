@@ -50,6 +50,15 @@ export const instruments = sqliteTable(
   (table) => [uniqueIndex("instruments_code_idx").on(table.code)],
 );
 
+export const fundPurchaseLimits = sqliteTable("fund_purchase_limits", {
+  instrumentId: integer("instrument_id").primaryKey(),
+  purchaseStatus: text("purchase_status").notNull().default("UNKNOWN"),
+  dailyLimitUnits: integer("daily_limit_units").notNull().default(0),
+  autoSync: integer("auto_sync").notNull().default(1),
+  source: text("source").notNull().default("MANUAL"),
+  sourceUpdatedAt: text("source_updated_at").notNull().default(""),
+});
+
 export const ledgerEntries = sqliteTable(
   "ledger_entries",
   {

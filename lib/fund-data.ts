@@ -15,6 +15,9 @@ export interface LiveFundData {
   standardBuyFeeBps: number;
   eastmoneyBuyFeeBps: number;
   minPurchase: number;
+  purchaseStatus: FundPurchaseStatus;
+  dailyPurchaseLimit: number;
+  purchaseLimitAvailable: boolean;
   latestNav: number;
   latestNavDate: string;
   quoteNav: number;
@@ -26,6 +29,15 @@ export interface LiveFundData {
   profileDataAvailable: boolean;
   source: "EASTMONEY";
   updatedAt: string;
+}
+
+export type FundPurchaseStatus =
+  "OPEN" | "LIMITED" | "PAUSED" | "EXCHANGE_ONLY" | "UNKNOWN";
+
+export interface FundPurchaseLimit {
+  status: FundPurchaseStatus;
+  dailyLimit: number;
+  available: boolean;
 }
 
 export interface FundNavPoint {
@@ -285,6 +297,31 @@ const plainText = (value: string) =>
     .replace(/&amp;/gi, "&")
     .trim();
 
+export function parseFundPurchaseLimit(html: string): FundPurchaseLimit {
+  const transactionStatus =
+    html.match(
+      /交易状态：<\/span>\s*<span[^>]*class=["'][^"']*\bstaticCell\b[^"']*["'][^>]*>([\s\S]*?)<\/span>\s*<span[^>]*class=["'][^"']*\bstaticCell\b/i,
+    )?.[1] ?? "";
+  const text = plainText(transactionStatus);
+  if (!text) return { status: "UNKNOWN", dailyLimit: 0, available: false };
+  const limitText = text.match(
+    /单日累计(?:购买|申购)上限\s*([\d,.]+)\s*元/i,
+  )?.[1];
+  const dailyLimit = Number((limitText ?? "").replaceAll(",", ""));
+  const normalizedLimit =
+    Number.isFinite(dailyLimit) && dailyLimit > 0 ? dailyLimit : 0;
+  const status: FundPurchaseStatus = /场内交易/.test(text)
+    ? "EXCHANGE_ONLY"
+    : /暂停申购|暂停购买/.test(text)
+      ? "PAUSED"
+      : /限大额/.test(text) || normalizedLimit > 0
+        ? "LIMITED"
+        : /开放申购|开放购买/.test(text)
+          ? "OPEN"
+          : "UNKNOWN";
+  return { status, dailyLimit: normalizedLimit, available: true };
+}
+
 export function parseFundCategory(profileHtml: string) {
   const tableMatch = profileHtml.match(
     /<th[^>]*>\s*基金类型\s*<\/th>\s*<td[^>]*>([\s\S]*?)<\/td>/i,
@@ -392,29 +429,36 @@ export async function fetchLiveFundData(
   if (quoteDate && !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate))
     throw new Error("净值查询日期格式不正确");
   const signal = AbortSignal.timeout(10_000);
-  const [scriptResult, feeResult, profileResult] = await Promise.allSettled([
-    fetch(
-      `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
-      {
+  const [scriptResult, feeResult, profileResult, purchaseResult] =
+    await Promise.allSettled([
+      fetch(
+        `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
+        {
+          headers: fundRequestHeaders,
+          signal,
+        },
+      ),
+      fetch(`https://fundf10.eastmoney.com/jjfl_${code}.html`, {
         headers: fundRequestHeaders,
         signal,
-      },
-    ),
-    fetch(`https://fundf10.eastmoney.com/jjfl_${code}.html`, {
-      headers: fundRequestHeaders,
-      signal,
-    }),
-    fetch(`https://fundf10.eastmoney.com/jbgk_${code}.html`, {
-      headers: fundRequestHeaders,
-      signal,
-    }),
-  ]);
+      }),
+      fetch(`https://fundf10.eastmoney.com/jbgk_${code}.html`, {
+        headers: fundRequestHeaders,
+        signal,
+      }),
+      fetch(`https://fund.eastmoney.com/${code}.html`, {
+        headers: fundRequestHeaders,
+        signal,
+      }),
+    ]);
   if (scriptResult.status !== "fulfilled")
     throw new Error("基金净值数据源暂时不可用");
   const scriptResponse = scriptResult.value;
   const feeResponse = feeResult.status === "fulfilled" ? feeResult.value : null;
   const profileResponse =
     profileResult.status === "fulfilled" ? profileResult.value : null;
+  const purchaseResponse =
+    purchaseResult.status === "fulfilled" ? purchaseResult.value : null;
   if (!scriptResponse.ok) throw new Error("未查询到该基金代码");
   const script = await scriptResponse.text();
   const name = valueOf(script, "fS_name");
@@ -431,6 +475,9 @@ export async function fetchLiveFundData(
   const minPurchase = Number(valueOf(script, "fund_minsg") || 0);
   const feeHtml = feeResponse?.ok ? await feeResponse.text() : "";
   const profileHtml = profileResponse?.ok ? await profileResponse.text() : "";
+  const purchaseLimit = purchaseResponse?.ok
+    ? parseFundPurchaseLimit(await purchaseResponse.text())
+    : { status: "UNKNOWN" as const, dailyLimit: 0, available: false };
   const fundCategory = parseFundCategory(profileHtml);
   const classification = classifyFund(code, name, fundCategory);
   return {
@@ -441,6 +488,9 @@ export async function fetchLiveFundData(
     standardBuyFeeBps: Math.round(standardRate * 100),
     eastmoneyBuyFeeBps: Math.round(eastmoneyRate * 100),
     minPurchase,
+    purchaseStatus: purchaseLimit.status,
+    dailyPurchaseLimit: purchaseLimit.dailyLimit,
+    purchaseLimitAvailable: purchaseLimit.available,
     latestNav,
     latestNavDate,
     quoteNav: quotePoint?.nav ?? 0,
