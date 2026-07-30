@@ -9,6 +9,9 @@ import {
   projectLongTermDca,
   simulateDcaVsLumpSum,
 } from "../lib/investment-planning";
+import { calculateDailyPlanProgress } from "../lib/daily-investment-plans";
+
+const yuan = (value: number) => value * 10_000;
 
 test("historical NAV parser returns the published daily series", () => {
   const points = parseEastmoneyNavPoints(`
@@ -379,4 +382,104 @@ test("long-term projection validates its boundaries", () => {
       }),
     /初始投入/,
   );
+});
+
+test("daily-limit plans keep custom monthly targets and use the smaller remaining or cap", () => {
+  const plans = [
+    {
+      id: 1,
+      account_id: 1,
+      instrument_id: 11,
+      amount_units: yuan(3_500),
+      execution_mode: "DAILY_LIMIT",
+      manual_daily_cap_units: 0,
+      status: "ACTIVE",
+    },
+    {
+      id: 2,
+      account_id: 1,
+      instrument_id: 12,
+      amount_units: yuan(500),
+      execution_mode: "DAILY_LIMIT",
+      manual_daily_cap_units: yuan(5),
+      status: "ACTIVE",
+    },
+    {
+      id: 3,
+      account_id: 1,
+      instrument_id: 13,
+      amount_units: yuan(500),
+      execution_mode: "DAILY_LIMIT",
+      manual_daily_cap_units: yuan(20),
+      status: "ACTIVE",
+    },
+  ];
+  const result = calculateDailyPlanProgress(
+    plans,
+    [
+      {
+        account_id: 1,
+        instrument_id: 11,
+        kind: "BUY",
+        trade_date: "2026-07-03",
+        gross_amount_units: yuan(3_450),
+      },
+    ],
+    [
+      {
+        instrument_id: 11,
+        purchase_status: "LIMITED",
+        daily_limit_units: yuan(100),
+      },
+      {
+        instrument_id: 12,
+        purchase_status: "LIMITED",
+        daily_limit_units: yuan(10),
+      },
+      {
+        instrument_id: 13,
+        purchase_status: "OPEN",
+        daily_limit_units: 0,
+      },
+    ],
+    "2026-07-30",
+  );
+
+  assert.deepEqual(
+    result.map((item) => item.todayUnits),
+    [yuan(50), yuan(5), yuan(20)],
+  );
+  assert.equal(
+    result.reduce((sum, item) => sum + item.targetUnits, 0),
+    yuan(4_500),
+  );
+  assert.equal(result[0].warning, "");
+  assert.equal(result[1].warning, "MONTH_OVERFLOW");
+});
+
+test("paused subscriptions never create a daily recommendation", () => {
+  const [result] = calculateDailyPlanProgress(
+    [
+      {
+        id: 1,
+        account_id: 1,
+        instrument_id: 11,
+        amount_units: yuan(500),
+        execution_mode: "DAILY_LIMIT",
+        manual_daily_cap_units: 0,
+        status: "ACTIVE",
+      },
+    ],
+    [],
+    [
+      {
+        instrument_id: 11,
+        purchase_status: "PAUSED",
+        daily_limit_units: yuan(100),
+      },
+    ],
+    "2026-07-30",
+  );
+  assert.equal(result.todayUnits, 0);
+  assert.equal(result.warning, "PAUSED");
 });

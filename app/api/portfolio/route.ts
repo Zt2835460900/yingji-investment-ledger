@@ -17,6 +17,7 @@ import {
   calculateTradingFeeUnits,
   feeRuleFromInput,
 } from "@/lib/fees";
+import { calculateDailyPlanProgress } from "@/lib/daily-investment-plans";
 import { fetchLatestFundNav, fetchLiveFundData } from "@/lib/fund-data";
 import {
   describeUnsupportedStockCode,
@@ -31,6 +32,7 @@ import {
 import {
   decimalToUnits,
   isoDate,
+  MONEY_SCALE,
   PRICE_SCALE,
   QUANTITY_SCALE,
   tradeGrossUnits,
@@ -55,6 +57,13 @@ const instrumentColumns =
   "id, name, code, market, asset_class, currency, product_type, buy_fee_bps, buy_discount_bps, sell_fee_bps, min_fee_units, eastmoney_fee_bps, min_purchase_units, redemption_fee_json, data_source, source_updated_at";
 
 const NAV_SYNC_COOLDOWN_MS = 2 * 60 * 1000;
+const shanghaiToday = () =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 const fundPurchaseStatuses = new Set([
   "OPEN",
   "LIMITED",
@@ -949,7 +958,7 @@ async function loadPortfolio() {
       .all<PriceRow>(),
     d1
       .prepare(
-        "SELECT id, account_id, instrument_id, amount_units, frequency, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
+        "SELECT id, account_id, instrument_id, amount_units, frequency, execution_mode, manual_daily_cap_units, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
       )
       .all<PlanRow>(),
     d1
@@ -981,15 +990,41 @@ async function loadPortfolio() {
       .prepare("SELECT key, value FROM app_meta WHERE key LIKE 'nav_sync_%'")
       .all<{ key: string; value: string }>(),
   ]);
-  return {
-    ...calculatePortfolio(
-      accounts.results,
-      instruments.results,
-      ledger.results,
-      prices.results,
+  const portfolio = calculatePortfolio(
+    accounts.results,
+    instruments.results,
+    ledger.results,
+    prices.results,
+    plans.results,
+    targets.results,
+  );
+  const dailyProgress = new Map(
+    calculateDailyPlanProgress(
       plans.results,
-      targets.results,
-    ),
+      ledger.results,
+      purchaseLimits.results,
+      shanghaiToday(),
+    ).map((item) => [item.planId, item]),
+  );
+  return {
+    ...portfolio,
+    plans: portfolio.plans.map((plan) => {
+      const progress = dailyProgress.get(plan.id);
+      return progress
+        ? {
+            ...plan,
+            monthlyTarget: progress.targetUnits / MONEY_SCALE,
+            investedThisMonth: progress.investedUnits / MONEY_SCALE,
+            remainingThisMonth: progress.remainingUnits / MONEY_SCALE,
+            dailyCap: progress.dailyCapUnits / MONEY_SCALE,
+            todayAmount: progress.todayUnits / MONEY_SCALE,
+            daysNeeded: progress.daysNeeded,
+            projectedCompletionDate: progress.projectedCompletionDate,
+            canCompleteThisMonth: progress.canCompleteThisMonth,
+            planWarning: progress.warning,
+          }
+        : plan;
+    }),
     journal: journal.results,
     purchaseLimits: purchaseLimits.results,
     navSync: navSyncFromRows(navSyncRows.results),
@@ -1817,9 +1852,15 @@ export async function POST(request: Request) {
       const accountId = Number(body.accountId);
       const instrumentId = Number(body.instrumentId);
       const amountUnits = decimalToUnits(body.amount);
+      const executionMode =
+        String(body.executionMode ?? "MONTHLY_DATE") === "DAILY_LIMIT"
+          ? "DAILY_LIMIT"
+          : "MONTHLY_DATE";
+      const manualDailyCapUnits = decimalToUnits(body.manualDailyCap);
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
+      if (manualDailyCapUnits < 0) throw new Error("每日金额上限不能为负数");
       const [account, instrument] = await Promise.all([
         d1
           .prepare("SELECT id FROM accounts WHERE id = ?")
@@ -1834,12 +1875,14 @@ export async function POST(request: Request) {
       if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       await d1
         .prepare(
-          "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, day_of_month, next_date) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, execution_mode, manual_daily_cap_units, day_of_month, next_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           accountId,
           instrumentId,
           amountUnits,
+          executionMode,
+          manualDailyCapUnits,
           Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
           isoDate(body.nextDate),
         )
@@ -1849,10 +1892,16 @@ export async function POST(request: Request) {
       const accountId = Number(body.accountId);
       const instrumentId = Number(body.instrumentId);
       const amountUnits = decimalToUnits(body.amount);
+      const executionMode =
+        String(body.executionMode ?? "MONTHLY_DATE") === "DAILY_LIMIT"
+          ? "DAILY_LIMIT"
+          : "MONTHLY_DATE";
+      const manualDailyCapUnits = decimalToUnits(body.manualDailyCap);
       if (!Number.isInteger(planId)) throw new Error("定投计划不存在");
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
+      if (manualDailyCapUnits < 0) throw new Error("每日金额上限不能为负数");
       const [account, instrument] = await Promise.all([
         d1
           .prepare("SELECT id FROM accounts WHERE id = ?")
@@ -1867,12 +1916,14 @@ export async function POST(request: Request) {
       if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       const updated = await d1
         .prepare(
-          "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, day_of_month = ?, next_date = ? WHERE id = ?",
+          "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, execution_mode = ?, manual_daily_cap_units = ?, day_of_month = ?, next_date = ? WHERE id = ?",
         )
         .bind(
           accountId,
           instrumentId,
           amountUnits,
+          executionMode,
+          manualDailyCapUnits,
           Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
           isoDate(body.nextDate),
           planId,

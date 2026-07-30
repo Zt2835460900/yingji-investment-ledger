@@ -70,6 +70,8 @@ const schemaStatements = [
     instrument_id INTEGER NOT NULL,
     amount_units INTEGER NOT NULL,
     frequency TEXT NOT NULL DEFAULT 'MONTHLY',
+    execution_mode TEXT NOT NULL DEFAULT 'MONTHLY_DATE',
+    manual_daily_cap_units INTEGER NOT NULL DEFAULT 0,
     day_of_month INTEGER NOT NULL DEFAULT 1,
     next_date TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -132,6 +134,8 @@ const upgradeStatements = [
   `ALTER TABLE ledger_entries ADD COLUMN purchase_channel TEXT NOT NULL DEFAULT 'MANUAL'`,
   `ALTER TABLE ledger_entries ADD COLUMN fee_source TEXT NOT NULL DEFAULT 'MANUAL'`,
   `ALTER TABLE ledger_entries ADD COLUMN confirmation_date TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE recurring_plans ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'MONTHLY_DATE'`,
+  `ALTER TABLE recurring_plans ADD COLUMN manual_daily_cap_units INTEGER NOT NULL DEFAULT 0`,
 ];
 
 const seedStatements = [

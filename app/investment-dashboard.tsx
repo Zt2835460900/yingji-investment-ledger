@@ -193,9 +193,20 @@ interface PortfolioData {
     accountName: string;
     instrumentName: string;
     amount: number;
+    execution_mode: string;
+    manual_daily_cap_units: number;
     day_of_month: number;
     next_date: string;
     status: string;
+    monthlyTarget?: number;
+    investedThisMonth?: number;
+    remainingThisMonth?: number;
+    dailyCap?: number;
+    todayAmount?: number;
+    daysNeeded?: number;
+    projectedCompletionDate?: string | null;
+    canCompleteThisMonth?: boolean;
+    planWarning?: "PAUSED" | "NO_CAP" | "MONTH_OVERFLOW" | "DONE" | "";
   }>;
   targets: Array<{
     instrument_id: number;
@@ -1964,22 +1975,37 @@ function Plans({
 }) {
   const activePlans = data.plans.filter((plan) => plan.status === "ACTIVE");
   const monthlyAmount = activePlans.reduce((sum, plan) => sum + plan.amount, 0);
+  const investedThisMonth = activePlans.reduce(
+    (sum, plan) => sum + (plan.investedThisMonth ?? 0),
+    0,
+  );
+  const todayAmount = activePlans.reduce(
+    (sum, plan) => sum + (plan.todayAmount ?? 0),
+    0,
+  );
   return (
     <div className="stack-page">
       <section className="plan-summary">
         <div>
           <span>
-            <WalletCards size={16} /> 每月计划投入
+            <WalletCards size={16} /> 每月目标合计
           </span>
           <strong>¥ {money(monthlyAmount, 0)}</strong>
           <p>{activePlans.length} 个计划正在运行</p>
         </div>
         <div>
           <span>
-            <CalendarDays size={16} /> 今年预计投入
+            <Check size={16} /> 本月已记账
           </span>
-          <strong>¥ {money(monthlyAmount * 12, 0)}</strong>
-          <p>按当前计划估算</p>
+          <strong>¥ {money(investedThisMonth, 0)}</strong>
+          <p>按真实买入流水自动累计</p>
+        </div>
+        <div>
+          <span>
+            <CalendarDays size={16} /> 今日建议投入
+          </span>
+          <strong>¥ {money(todayAmount, 0)}</strong>
+          <p>按各项目剩余目标和每日上限计算</p>
         </div>
         <button className="primary-button light" onClick={onPlan}>
           <Plus size={17} />
@@ -1992,6 +2018,24 @@ function Plans({
             (item) => item.id === plan.instrument_id,
           );
           const accent = COLORS[index % COLORS.length];
+          const dailyMode = plan.execution_mode === "DAILY_LIMIT";
+          const target = plan.monthlyTarget ?? plan.amount;
+          const invested = plan.investedThisMonth ?? 0;
+          const remaining = plan.remainingThisMonth ?? target;
+          const progress =
+            target > 0 ? Math.min(100, (invested / target) * 100) : 0;
+          const dailyNote =
+            plan.planWarning === "DONE"
+              ? "本月目标已完成"
+              : plan.planWarning === "PAUSED"
+                ? "当前暂停申购，今日不安排"
+                : plan.planWarning === "NO_CAP"
+                  ? "尚未同步到限额，请填写手动每日上限"
+                  : plan.planWarning === "MONTH_OVERFLOW"
+                    ? `按当前上限预计 ${plan.projectedCompletionDate ?? "下月"} 完成`
+                    : plan.projectedCompletionDate
+                      ? `预计 ${plan.projectedCompletionDate} 完成本月目标`
+                      : "等待真实买入流水";
           return (
             <article
               className="plan-card"
@@ -2005,7 +2049,11 @@ function Plans({
                 <span
                   className={`status-badge ${plan.status === "ACTIVE" ? "" : "paused"}`}
                 >
-                  {plan.status === "ACTIVE" ? "运行中" : "已暂停"}
+                  {plan.status === "ACTIVE"
+                    ? dailyMode
+                      ? "按限额每日"
+                      : "每月提醒"
+                    : "已暂停"}
                 </span>
               </div>
               <div className="plan-card-title">
@@ -2022,32 +2070,57 @@ function Plans({
                 <span>{plan.accountName}</span>
               </div>
               <div className="plan-amount">
-                <span>每月计划投入</span>
+                <span>本项目月度目标</span>
                 <div>
                   <strong>¥{money(plan.amount, 0)}</strong>
                   <small>/ 月</small>
                 </div>
               </div>
-              <div className="plan-date">
-                <div>
-                  <span>下一期</span>
-                  <strong>{plan.next_date}</strong>
+              {dailyMode ? (
+                <div className="plan-date daily-plan-stats">
+                  <div>
+                    <span>今日建议</span>
+                    <strong>¥{money(plan.todayAmount ?? 0)}</strong>
+                  </div>
+                  <div>
+                    <span>每日有效上限</span>
+                    <strong>¥{money(plan.dailyCap ?? 0)}</strong>
+                  </div>
+                  <div>
+                    <span>本月已记账</span>
+                    <strong>¥{money(invested)}</strong>
+                  </div>
+                  <div>
+                    <span>本月剩余</span>
+                    <strong>¥{money(remaining)}</strong>
+                  </div>
                 </div>
-                <div>
-                  <span>固定执行日</span>
-                  <strong>每月 {plan.day_of_month} 日</strong>
+              ) : (
+                <div className="plan-date">
+                  <div>
+                    <span>下一期</span>
+                    <strong>{plan.next_date}</strong>
+                  </div>
+                  <div>
+                    <span>固定执行日</span>
+                    <strong>每月 {plan.day_of_month} 日</strong>
+                  </div>
                 </div>
-              </div>
+              )}
               <div className="plan-progress">
                 <div>
                   <span
                     style={{
-                      width: `${Math.min(100, (plan.day_of_month / 28) * 100)}%`,
+                      width: `${dailyMode ? progress : Math.min(100, (plan.day_of_month / 28) * 100)}%`,
                       background: accent,
                     }}
                   />
                 </div>
-                <small>到期后生成待确认任务，不会伪造成交</small>
+                <small>
+                  {dailyMode
+                    ? `${dailyNote} · 月度目标完成 ${progress.toFixed(0)}%`
+                    : "到期后生成待确认任务，不会伪造成交"}
+                </small>
               </div>
               <div className="plan-actions">
                 <button
@@ -3513,6 +3586,8 @@ function ModalForm({
     priceDate: editingPrice?.price_date ?? today,
     nextDate: editingPlan?.next_date ?? today,
     dayOfMonth: String(editingPlan?.day_of_month ?? 5),
+    executionMode: editingPlan?.execution_mode ?? "DAILY_LIMIT",
+    manualDailyCap: String((editingPlan?.manual_daily_cap_units ?? 0) / 10_000),
     amount: editingEntry
       ? String(editingEntry.gross_amount_units / 10_000)
       : editingPlan
@@ -4902,7 +4977,7 @@ function ModalForm({
                   )}
                 </div>
               </div>
-              <Field label="每月金额">
+              <Field label="本项目月度目标">
                 <input
                   required
                   inputMode="decimal"
@@ -4910,29 +4985,67 @@ function ModalForm({
                   value={form.amount ?? ""}
                   onChange={(e) => set("amount", e.target.value)}
                 />
+                <small>每个项目独立填写，页面会自动合计全部月度目标</small>
               </Field>
-              <Field label="每月执行日">
-                <input
-                  required
-                  type="number"
-                  min="1"
-                  max="28"
-                  value={form.dayOfMonth}
-                  onChange={(e) => set("dayOfMonth", e.target.value)}
-                />
+              <Field label="执行方式">
+                <select
+                  value={form.executionMode}
+                  onChange={(e) => set("executionMode", e.target.value)}
+                >
+                  <option value="DAILY_LIMIT">每天按购入限额推进</option>
+                  <option value="MONTHLY_DATE">每月固定日期提醒</option>
+                </select>
               </Field>
-              <Field label="下一期日期" wide>
-                <input
-                  required
-                  type="date"
-                  value={form.nextDate}
-                  onChange={(e) => set("nextDate", e.target.value)}
-                />
-              </Field>
+              {form.executionMode === "DAILY_LIMIT" ? (
+                <>
+                  <Field label="手动每日上限（元）">
+                    <input
+                      required
+                      type="number"
+                      min="0"
+                      step="any"
+                      inputMode="decimal"
+                      value={form.manualDailyCap}
+                      onChange={(e) => set("manualDailyCap", e.target.value)}
+                    />
+                    <small>
+                      填 0 自动使用基金同步限额；填写金额时也不会超过同步限额
+                    </small>
+                  </Field>
+                  <div className="form-note wide">
+                    <CalendarDays size={17} />
+                    <span>
+                      当前限额参考：{purchaseLimitText(selectedPurchaseLimit)}
+                      。每天自动计算“同步限额、手动上限、本月剩余目标”中的可执行金额，无需每天修改计划。
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Field label="每月执行日">
+                    <input
+                      required
+                      type="number"
+                      min="1"
+                      max="28"
+                      value={form.dayOfMonth}
+                      onChange={(e) => set("dayOfMonth", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="下一期日期" wide>
+                    <input
+                      required
+                      type="date"
+                      value={form.nextDate}
+                      onChange={(e) => set("nextDate", e.target.value)}
+                    />
+                  </Field>
+                </>
+              )}
               <div className="form-note wide">
                 <CalendarDays size={17} />
                 <span>
-                  系统只生成计划提醒；实际成交后仍需确认份额、价格与手续费。
+                  月度目标只需设置一次；系统不会伪造外部平台成交，真实买入流水会自动扣减本月剩余目标。
                 </span>
               </div>
             </div>

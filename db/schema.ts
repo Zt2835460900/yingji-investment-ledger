@@ -112,6 +112,8 @@ export const recurringPlans = sqliteTable("recurring_plans", {
   instrumentId: integer("instrument_id").notNull(),
   amountUnits: integer("amount_units").notNull(),
   frequency: text("frequency").notNull().default("MONTHLY"),
+  executionMode: text("execution_mode").notNull().default("MONTHLY_DATE"),
+  manualDailyCapUnits: integer("manual_daily_cap_units").notNull().default(0),
   dayOfMonth: integer("day_of_month").notNull().default(1),
   nextDate: text("next_date").notNull(),
   status: text("status").notNull().default("ACTIVE"),
