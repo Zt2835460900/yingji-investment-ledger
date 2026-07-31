@@ -6030,3 +6030,331 @@ td small {
     grid-template-columns: 1fr;
   }
 }
+
+.company-tracker-panel {
+  overflow: hidden;
+}
+
+.company-tracker-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.company-estimate-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 22px 0 18px;
+}
+
+.company-estimate-summary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 17px 18px;
+  border: 1px solid #e6eaf2;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #fff, #f8faff);
+}
+
+.company-estimate-summary span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #697386;
+  font-size: 13px;
+}
+
+.company-estimate-summary strong {
+  color: #20283a;
+  font-size: clamp(22px, 2.6vw, 31px);
+  line-height: 1.15;
+}
+
+.company-estimate-summary small {
+  color: #8a93a4;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.company-estimate-summary .up strong,
+.company-quote-cell strong.up {
+  color: #de4f5f;
+}
+
+.company-estimate-summary .down strong,
+.company-quote-cell strong.down {
+  color: #159b72;
+}
+
+.company-tracker-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border: 1px solid #f6c9ce;
+  border-radius: 12px;
+  background: #fff5f6;
+  color: #b6414e;
+  font-size: 13px;
+}
+
+.company-tracker-error button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.company-watch-list {
+  overflow: hidden;
+  border: 1px solid #e5e9f1;
+  border-radius: 17px;
+  background: #fff;
+}
+
+.company-watch-list article {
+  display: grid;
+  grid-template-columns:
+    minmax(190px, 1.4fr) minmax(105px, 0.7fr) minmax(190px, 1.15fr)
+    minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #edf0f5;
+  transition:
+    background 160ms ease,
+    opacity 160ms ease;
+}
+
+.company-watch-list article:last-child {
+  border-bottom: 0;
+}
+
+.company-watch-list article:hover {
+  background: #fafbfe;
+}
+
+.company-watch-list article.paused {
+  opacity: 0.62;
+  background: #f8f9fb;
+}
+
+.company-watch-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.company-watch-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 12px;
+  background: #eef2ff;
+  color: #5b7cfa;
+}
+
+.company-watch-main > div,
+.company-quote-cell,
+.company-earnings-cell,
+.company-history-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.company-watch-main strong,
+.company-quote-cell strong,
+.company-earnings-cell strong,
+.company-history-cell strong {
+  overflow: hidden;
+  color: #252d3e;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.company-watch-main span,
+.company-quote-cell span,
+.company-earnings-cell span,
+.company-history-cell span,
+.company-quote-cell small,
+.company-earnings-cell small,
+.company-history-cell small {
+  overflow: hidden;
+  color: #7c8698;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.company-quote-cell > span,
+.company-earnings-cell > span,
+.company-history-cell > span {
+  color: #9aa2b1;
+}
+
+.company-watch-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.company-watch-actions button,
+.company-watch-actions a {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #e1e6ef;
+  border-radius: 9px;
+  background: #fff;
+  color: #667085;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.company-watch-actions button:hover,
+.company-watch-actions a:hover {
+  border-color: #b7c4f6;
+  background: #f4f6ff;
+  color: #4969e8;
+}
+
+.company-watch-actions .danger:hover {
+  border-color: #f0b4bc;
+  background: #fff2f4;
+  color: #d44858;
+}
+
+.company-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 20px 24px 8px;
+}
+
+.company-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: #5d6678;
+  font-size: 13px;
+}
+
+.company-form-grid input,
+.company-form-grid select,
+.company-form-grid textarea {
+  width: 100%;
+  border: 1px solid #dce1ea;
+  border-radius: 11px;
+  background: #fff;
+  color: #242b3b;
+  font: inherit;
+  outline: none;
+  padding: 11px 12px;
+}
+
+.company-form-grid textarea {
+  resize: vertical;
+}
+
+.company-form-grid input:focus,
+.company-form-grid select:focus,
+.company-form-grid textarea:focus {
+  border-color: #7f98f4;
+  box-shadow: 0 0 0 3px rgb(91 124 250 / 11%);
+}
+
+.company-form-wide {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1120px) {
+  .company-estimate-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .company-watch-list article {
+    grid-template-columns:
+      minmax(190px, 1.3fr) repeat(2, minmax(145px, 1fr))
+      auto;
+  }
+
+  .company-history-cell {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .company-tracker-head-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .company-tracker-head-actions button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .company-estimate-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .company-watch-list {
+    border: 0;
+    background: transparent;
+  }
+
+  .company-watch-list article {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 12px;
+    padding: 15px;
+    border: 1px solid #e5e9f1;
+    border-radius: 15px;
+    background: #fff;
+  }
+
+  .company-watch-list article:last-child {
+    border-bottom: 1px solid #e5e9f1;
+  }
+
+  .company-watch-main,
+  .company-earnings-cell,
+  .company-watch-actions {
+    grid-column: 1 / -1;
+  }
+
+  .company-history-cell {
+    display: flex;
+  }
+
+  .company-watch-actions {
+    justify-content: flex-end;
+    padding-top: 4px;
+  }
+
+  .company-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .company-form-wide {
+    grid-column: auto;
+  }
+}

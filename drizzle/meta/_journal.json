@@ -64,6 +64,13 @@
       "when": 1785383002802,
       "tag": "0008_sloppy_roughhouse",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1785465295111,
+      "tag": "0009_lush_magneto",
+      "breakpoints": true
     }
   ]
 }

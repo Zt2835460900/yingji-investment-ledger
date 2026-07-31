@@ -2,15 +2,20 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  BellRing,
   BookOpen,
+  Building2,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
   Edit3,
   ExternalLink,
   Layers3,
+  Pause,
+  Play,
   Plus,
   RefreshCcw,
+  TrendingUp,
   Trash2,
   X,
 } from "lucide-react";
@@ -31,6 +36,11 @@ import {
   type DcaComparisonResult,
   type LongTermDcaProjection,
 } from "@/lib/investment-planning";
+import {
+  calculateHoldingMoveEstimate,
+  type CompanyInsight,
+  type CompanyMarket,
+} from "@/lib/company-insights";
 
 const money = (value: number, digits = 2) =>
   new Intl.NumberFormat("zh-CN", {
@@ -941,6 +951,595 @@ interface LookthroughResponse {
   };
 }
 
+interface TrackedCompany {
+  id: number;
+  symbol: string;
+  name: string;
+  market: CompanyMarket;
+  source: string;
+  status: "ACTIVE" | "PAUSED";
+  holding_rank: number;
+  estimated_weight_bps: number;
+  notes: string;
+  last_discovered_at: string;
+}
+
+interface DiscoveredCompany {
+  symbol: string;
+  name: string;
+  market: CompanyMarket;
+  weightPercent: number;
+}
+
+interface CompanyForm {
+  symbol: string;
+  name: string;
+  market: CompanyMarket;
+  notes: string;
+}
+
+const emptyCompanyForm = (): CompanyForm => ({
+  symbol: "",
+  name: "",
+  market: "US",
+  notes: "",
+});
+
+const companyMarketLabel: Record<CompanyMarket, string> = {
+  US: "美股",
+  CN: "A股",
+  HK: "港股",
+};
+
+const inferCompanyMarket = (symbol: string): CompanyMarket =>
+  /^\d{6}$/.test(symbol) ? "CN" : /^\d{1,5}$/.test(symbol) ? "HK" : "US";
+
+const signedPercent = (value: number, digits = 2) =>
+  `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
+
+const daysUntil = (date: string | null) => {
+  if (!date) return null;
+  const todayValue = new Date();
+  const target = new Date(`${date}T12:00:00`);
+  const todayStart = new Date(
+    todayValue.getFullYear(),
+    todayValue.getMonth(),
+    todayValue.getDate(),
+    12,
+  );
+  if (Number.isNaN(target.getTime())) return null;
+  return Math.ceil((target.getTime() - todayStart.getTime()) / 86_400_000);
+};
+
+function CompanyEarningsTracker({
+  discovered,
+  totalAssets,
+}: {
+  discovered: DiscoveredCompany[];
+  totalAssets: number;
+}) {
+  const [companies, setCompanies] = useState<TrackedCompany[]>([]);
+  const [insights, setInsights] = useState<CompanyInsight[]>([]);
+  const [updatedAt, setUpdatedAt] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState<TrackedCompany | "new" | null>(null);
+  const [form, setForm] = useState<CompanyForm>(emptyCompanyForm);
+  const discoveryKey = discovered
+    .map(
+      (company) =>
+        `${company.market}:${company.symbol}:${company.weightPercent.toFixed(2)}`,
+    )
+    .join("|");
+
+  const loadWatchlist = async () => {
+    try {
+      const response = await fetch("/api/company-watchlist", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as {
+        companies?: TrackedCompany[];
+        error?: string;
+      };
+      if (!response.ok)
+        throw new Error(payload.error || "主要公司列表读取失败");
+      setCompanies(payload.companies ?? []);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "主要公司列表读取失败",
+      );
+    }
+  };
+
+  const mutateWatchlist = async (
+    action: string,
+    payload: Record<string, unknown> = {},
+    silent = false,
+  ) => {
+    if (!silent) setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/company-watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...payload }),
+      });
+      const result = (await response.json()) as {
+        companies?: TrackedCompany[];
+        error?: string;
+      };
+      if (!response.ok) throw new Error(result.error || "公司追踪保存失败");
+      setCompanies(result.companies ?? []);
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "公司追踪保存失败");
+      return false;
+    } finally {
+      if (!silent) setSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadWatchlist(), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!discovered.length) return;
+    const timer = window.setTimeout(
+      () =>
+        void mutateWatchlist(
+          "sync",
+          {
+            companies: discovered.map((company) => ({
+              symbol: company.symbol,
+              name: company.name,
+              market: company.market,
+              weightPercent: company.weightPercent,
+            })),
+          },
+          true,
+        ),
+      0,
+    );
+    return () => window.clearTimeout(timer);
+    // The key captures the full automatic watchlist identity and weights.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discoveryKey]);
+
+  const activeCompanies = companies
+    .filter((company) => company.status === "ACTIVE")
+    .slice(0, 15);
+  const activeKey = activeCompanies
+    .map((company) => `${company.market}:${company.symbol}`)
+    .join("|");
+
+  const loadInsights = async () => {
+    if (!activeCompanies.length) {
+      setInsights([]);
+      setUpdatedAt("");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const symbols = activeCompanies.map((company) => company.symbol);
+      const markets = activeCompanies.map((company) => company.market);
+      const response = await fetch(
+        `/api/company-insights?symbols=${encodeURIComponent(symbols.join(","))}&markets=${encodeURIComponent(markets.join(","))}`,
+        { cache: "no-store" },
+      );
+      const payload = (await response.json()) as {
+        items?: CompanyInsight[];
+        updatedAt?: string;
+        error?: string;
+      };
+      if (!response.ok)
+        throw new Error(payload.error || "公司行情与财报读取失败");
+      setInsights(payload.items ?? []);
+      setUpdatedAt(payload.updatedAt ?? new Date().toISOString());
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "公司行情与财报读取失败",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadInsights(), 0);
+    const refresh = window.setInterval(
+      () => void loadInsights(),
+      15 * 60 * 1000,
+    );
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(refresh);
+    };
+    // Active symbols are the complete external-data query identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey]);
+
+  const quoteRows = insights.flatMap((insight) =>
+    insight.quote ? [insight.quote] : [],
+  );
+  const estimate = calculateHoldingMoveEstimate(
+    discovered.map((company) => ({
+      symbol: company.symbol,
+      weightPercent: company.weightPercent,
+    })),
+    quoteRows,
+    totalAssets,
+  );
+  const insightMap = new Map(
+    insights.map((insight) => [`${insight.market}:${insight.symbol}`, insight]),
+  );
+  const upcomingCount = insights.filter((insight) => {
+    const days = daysUntil(insight.earnings?.upcomingDate ?? null);
+    return days !== null && days >= 0 && days <= 30;
+  }).length;
+
+  const openNew = () => {
+    setForm(emptyCompanyForm());
+    setEditing("new");
+  };
+  const openEdit = (company: TrackedCompany) => {
+    setForm({
+      symbol: company.symbol,
+      name: company.name,
+      market: company.market,
+      notes: company.notes,
+    });
+    setEditing(company);
+  };
+  const saveCompany = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const ok = await mutateWatchlist(editing === "new" ? "create" : "update", {
+      ...(editing && editing !== "new" ? { id: editing.id } : {}),
+      ...form,
+    });
+    if (ok) setEditing(null);
+  };
+
+  return (
+    <section className="panel company-tracker-panel">
+      <div className="feature-panel-head">
+        <div>
+          <span className="feature-kicker">
+            <BellRing size={16} /> 底层公司雷达
+          </span>
+          <h2>持仓涨幅预估与主要公司财报</h2>
+          <p>自动追踪基金披露的主要公司；可新增、编辑、暂停、恢复或删除。</p>
+        </div>
+        <div className="company-tracker-head-actions">
+          <button
+            className="secondary-button"
+            disabled={loading || !activeCompanies.length}
+            onClick={() => void loadInsights()}
+          >
+            <RefreshCcw size={16} className={loading ? "spin" : ""} />
+            {loading ? "更新中" : "刷新数据"}
+          </button>
+          <button className="primary-button" onClick={openNew}>
+            <Plus size={16} /> 新增公司
+          </button>
+        </div>
+      </div>
+
+      <div className="company-estimate-summary">
+        <div className={estimate.estimatedRate >= 0 ? "up" : "down"}>
+          <span>
+            <TrendingUp size={16} /> 底层持仓估算涨跌
+          </span>
+          <strong>{signedPercent(estimate.estimatedRate * 100)}</strong>
+          <small>折算组合估值贡献，不是基金最终净值</small>
+        </div>
+        <div className={estimate.estimatedProfit >= 0 ? "up" : "down"}>
+          <span>估算当日盈亏</span>
+          <strong>
+            {estimate.estimatedProfit >= 0 ? "+" : "-"}¥
+            {money(Math.abs(estimate.estimatedProfit))}
+          </strong>
+          <small>按当前总资产 ¥{money(totalAssets, 0)} 估算</small>
+        </div>
+        <div>
+          <span>已覆盖组合</span>
+          <strong>{estimate.coveredWeightPercent.toFixed(2)}%</strong>
+          <small>{estimate.matchedCompanies} 家底层公司有可用行情</small>
+        </div>
+        <div>
+          <span>30 天内财报</span>
+          <strong>{upcomingCount} 家</strong>
+          <small>
+            {updatedAt
+              ? `更新于 ${new Date(updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+              : "等待首次更新"}
+          </small>
+        </div>
+      </div>
+
+      {error && (
+        <div className="company-tracker-error">
+          <span>{error}</span>
+          <button onClick={() => setError("")}>关闭</button>
+        </div>
+      )}
+
+      {companies.length ? (
+        <div className="company-watch-list">
+          {companies.map((company) => {
+            const insight = insightMap.get(
+              `${company.market}:${company.symbol}`,
+            );
+            const quote = insight?.quote;
+            const earnings = insight?.earnings;
+            const reportDays = daysUntil(earnings?.upcomingDate ?? null);
+            const contribution =
+              quote && company.estimated_weight_bps > 0
+                ? (company.estimated_weight_bps / 100) *
+                  (quote.changePercent / 100)
+                : null;
+            return (
+              <article
+                key={company.id}
+                className={company.status === "PAUSED" ? "paused" : ""}
+              >
+                <div className="company-watch-main">
+                  <span className="company-watch-icon">
+                    <Building2 size={18} />
+                  </span>
+                  <div>
+                    <strong>{company.name}</strong>
+                    <span>
+                      {company.symbol} · {companyMarketLabel[company.market]}
+                      {company.estimated_weight_bps > 0
+                        ? ` · 组合约 ${(company.estimated_weight_bps / 100).toFixed(2)}%`
+                        : " · 手动追踪"}
+                    </span>
+                  </div>
+                </div>
+                <div className="company-quote-cell">
+                  <span>最新涨跌</span>
+                  {company.status === "PAUSED" ? (
+                    <strong>已暂停</strong>
+                  ) : quote ? (
+                    <>
+                      <strong
+                        className={quote.changePercent >= 0 ? "up" : "down"}
+                      >
+                        {signedPercent(quote.changePercent)}
+                      </strong>
+                      <small>
+                        {contribution !== null
+                          ? `贡献 ${signedPercent(contribution, 3)}`
+                          : `现价 ${quote.price.toFixed(2)}`}
+                      </small>
+                    </>
+                  ) : (
+                    <>
+                      <strong>待更新</strong>
+                      <small>{insight?.errors[0] ?? "暂无行情"}</small>
+                    </>
+                  )}
+                </div>
+                <div className="company-earnings-cell">
+                  <span>下一次财报</span>
+                  {company.status === "PAUSED" ? (
+                    <strong>停止追踪</strong>
+                  ) : earnings?.upcomingDate ? (
+                    <>
+                      <strong>
+                        {earnings.upcomingDate}
+                        {reportDays !== null && reportDays >= 0
+                          ? ` · ${reportDays === 0 ? "今天" : `${reportDays} 天后`}`
+                          : ""}
+                      </strong>
+                      <small>
+                        {[earnings.upcomingPeriod, earnings.upcomingTiming]
+                          .filter(Boolean)
+                          .join(" · ")}
+                        {earnings.epsForecast !== null
+                          ? ` · EPS 预期 ${earnings.epsForecast}`
+                          : ""}
+                      </small>
+                    </>
+                  ) : (
+                    <>
+                      <strong>待公司确认</strong>
+                      <small>数据源尚未给出下一日期</small>
+                    </>
+                  )}
+                </div>
+                <div className="company-history-cell">
+                  <span>最近财报</span>
+                  {earnings?.latestReportDate ? (
+                    <>
+                      <strong>{earnings.latestReportDate}</strong>
+                      <small>
+                        {earnings.latestPeriod}
+                        {earnings.latestSurprisePercent !== null
+                          ? ` · EPS ${earnings.latestSurprisePercent >= 0 ? "超预期" : "低于预期"} ${Math.abs(earnings.latestSurprisePercent).toFixed(2)}%`
+                          : ""}
+                      </small>
+                    </>
+                  ) : (
+                    <>
+                      <strong>暂无历史值</strong>
+                      <small>{earnings?.sourceName ?? "等待同步"}</small>
+                    </>
+                  )}
+                </div>
+                <div className="company-watch-actions">
+                  {earnings?.sourceUrl && (
+                    <a
+                      href={earnings.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`查看${company.name}财报来源`}
+                    >
+                      <ExternalLink size={15} />
+                    </a>
+                  )}
+                  <button
+                    aria-label={`编辑${company.name}`}
+                    onClick={() => openEdit(company)}
+                  >
+                    <Edit3 size={15} />
+                  </button>
+                  <button
+                    aria-label={
+                      company.status === "ACTIVE"
+                        ? `暂停追踪${company.name}`
+                        : `恢复追踪${company.name}`
+                    }
+                    onClick={() =>
+                      void mutateWatchlist("toggle", { id: company.id })
+                    }
+                  >
+                    {company.status === "ACTIVE" ? (
+                      <Pause size={15} />
+                    ) : (
+                      <Play size={15} />
+                    )}
+                  </button>
+                  <button
+                    className="danger"
+                    aria-label={`删除${company.name}`}
+                    onClick={() =>
+                      confirm(
+                        `删除 ${company.name} 的财报追踪？不会影响基金持仓和交易记录。`,
+                      ) && void mutateWatchlist("delete", { id: company.id })
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="feature-empty compact">
+          <strong>
+            {discovered.length ? "正在建立主要公司追踪…" : "暂无可追踪公司"}
+          </strong>
+          <span>
+            基金持仓披露读取成功后会自动加入主要公司，也可以手动新增。
+          </span>
+        </div>
+      )}
+
+      <p className="feature-disclaimer">
+        预估只覆盖公开披露且有行情的底层公司，未计入未披露持仓、汇率、现金、费用和跨市场时差；财报日期及预测数据以公司最终公告为准，不构成投资建议。
+      </p>
+
+      {editing && (
+        <div
+          className="feature-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && setEditing(null)
+          }
+        >
+          <form className="feature-modal company-modal" onSubmit={saveCompany}>
+            <div className="feature-modal-head">
+              <div>
+                <span>主要公司追踪</span>
+                <h2>{editing === "new" ? "新增追踪公司" : "编辑追踪公司"}</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setEditing(null)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="company-form-grid">
+              <label>
+                <span>交易市场</span>
+                <select
+                  value={form.market}
+                  onChange={(event) =>
+                    setForm({
+                      ...form,
+                      market: event.target.value as CompanyMarket,
+                    })
+                  }
+                >
+                  <option value="US">美股</option>
+                  <option value="CN">沪深 A 股</option>
+                  <option value="HK">港股（行情追踪）</option>
+                </select>
+              </label>
+              <label>
+                <span>公司代码</span>
+                <input
+                  required
+                  autoComplete="off"
+                  maxLength={12}
+                  placeholder={
+                    form.market === "US"
+                      ? "例如 NVDA"
+                      : form.market === "CN"
+                        ? "例如 600519"
+                        : "例如 00700"
+                  }
+                  value={form.symbol}
+                  onChange={(event) =>
+                    setForm({
+                      ...form,
+                      symbol: event.target.value.toUpperCase(),
+                    })
+                  }
+                />
+              </label>
+              <label className="company-form-wide">
+                <span>公司名称</span>
+                <input
+                  required
+                  maxLength={80}
+                  placeholder="例如 英伟达"
+                  value={form.name}
+                  onChange={(event) =>
+                    setForm({ ...form, name: event.target.value })
+                  }
+                />
+              </label>
+              <label className="company-form-wide">
+                <span>备注（可选）</span>
+                <textarea
+                  rows={3}
+                  maxLength={500}
+                  placeholder="例如：重点观察数据中心收入和毛利率"
+                  value={form.notes}
+                  onChange={(event) =>
+                    setForm({ ...form, notes: event.target.value })
+                  }
+                />
+              </label>
+            </div>
+            <div className="feature-modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setEditing(null)}
+              >
+                取消
+              </button>
+              <button className="primary-button" disabled={saving}>
+                {saving ? "保存中…" : "保存追踪"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function FundLookthrough({
   instruments,
   holdings,
@@ -1021,109 +1620,128 @@ export function FundLookthrough({
   }, [queryKey]);
 
   const top = result?.lookthrough.holdings.slice(0, 12) ?? [];
+  const discoveredCompanies = top
+    .filter((holding) =>
+      /^(?:[A-Z][A-Z0-9.-]{0,9}|\d{5,6})$/i.test(holding.stockCode),
+    )
+    .map((holding) => ({
+      symbol: holding.stockCode.toUpperCase(),
+      name: holding.stockName,
+      market: inferCompanyMarket(holding.stockCode),
+      weightPercent: holding.estimatedPortfolioWeightPercent,
+    }));
   const maxWeight = Math.max(
     0.01,
     ...top.map((holding) => holding.estimatedPortfolioWeightPercent),
   );
   return (
-    <section className="panel lookthrough-panel">
-      <div className="feature-panel-head">
-        <div>
-          <span className="feature-kicker">
-            <Layers3 size={16} /> 基金持仓穿透
-          </span>
-          <h2>你真正持有哪些底层公司</h2>
-          <p>按基金定期报告和当前基金市值估算，自动识别多只基金重复持仓。</p>
-        </div>
-        <button
-          className="secondary-button"
-          disabled={loading || !queryFunds.length}
-          onClick={() => void load()}
-        >
-          <RefreshCcw size={16} className={loading ? "spin" : ""} />
-          {loading ? "穿透中" : "更新披露"}
-        </button>
-      </div>
-      {error ? (
-        <div className="feature-empty">
-          <strong>暂时无法完成持仓穿透</strong>
-          <span>{error}</span>
-        </div>
-      ) : top.length ? (
-        <>
-          <div className="lookthrough-summary">
-            <div>
-              <span>已读取基金</span>
-              <strong>{result?.funds.length ?? 0} 只</strong>
-            </div>
-            <div>
-              <span>底层标的</span>
-              <strong>{result?.lookthrough.holdings.length ?? 0} 项</strong>
-            </div>
-            <div>
-              <span>重复持仓</span>
-              <strong>{result?.lookthrough.overlaps.length ?? 0} 项</strong>
-            </div>
-            <div>
-              <span>披露覆盖组合</span>
-              <strong>
-                {(result?.lookthrough.disclosedCoveragePercent ?? 0).toFixed(2)}
-                %
-              </strong>
-            </div>
+    <>
+      <section className="panel lookthrough-panel">
+        <div className="feature-panel-head">
+          <div>
+            <span className="feature-kicker">
+              <Layers3 size={16} /> 基金持仓穿透
+            </span>
+            <h2>你真正持有哪些底层公司</h2>
+            <p>按基金定期报告和当前基金市值估算，自动识别多只基金重复持仓。</p>
           </div>
-          <div className="lookthrough-list">
-            {top.map((holding, index) => (
-              <div key={`${holding.stockCode}-${holding.stockName}`}>
-                <span className="lookthrough-rank">{index + 1}</span>
-                <div className="lookthrough-company">
-                  <strong>{holding.stockName}</strong>
-                  <span>
-                    {holding.stockCode}
-                    {holding.isOverlap && ` · ${holding.fundCount} 只基金重合`}
-                  </span>
-                  <div>
-                    <i
-                      style={{
-                        width: `${Math.max(2, (holding.estimatedPortfolioWeightPercent / maxWeight) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-                <strong className="lookthrough-weight">
-                  {holding.estimatedPortfolioWeightPercent.toFixed(2)}%
-                  <small>组合估算</small>
+          <button
+            className="secondary-button"
+            disabled={loading || !queryFunds.length}
+            onClick={() => void load()}
+          >
+            <RefreshCcw size={16} className={loading ? "spin" : ""} />
+            {loading ? "穿透中" : "更新披露"}
+          </button>
+        </div>
+        {error ? (
+          <div className="feature-empty">
+            <strong>暂时无法完成持仓穿透</strong>
+            <span>{error}</span>
+          </div>
+        ) : top.length ? (
+          <>
+            <div className="lookthrough-summary">
+              <div>
+                <span>已读取基金</span>
+                <strong>{result?.funds.length ?? 0} 只</strong>
+              </div>
+              <div>
+                <span>底层标的</span>
+                <strong>{result?.lookthrough.holdings.length ?? 0} 项</strong>
+              </div>
+              <div>
+                <span>重复持仓</span>
+                <strong>{result?.lookthrough.overlaps.length ?? 0} 项</strong>
+              </div>
+              <div>
+                <span>披露覆盖组合</span>
+                <strong>
+                  {(result?.lookthrough.disclosedCoveragePercent ?? 0).toFixed(
+                    2,
+                  )}
+                  %
                 </strong>
               </div>
-            ))}
+            </div>
+            <div className="lookthrough-list">
+              {top.map((holding, index) => (
+                <div key={`${holding.stockCode}-${holding.stockName}`}>
+                  <span className="lookthrough-rank">{index + 1}</span>
+                  <div className="lookthrough-company">
+                    <strong>{holding.stockName}</strong>
+                    <span>
+                      {holding.stockCode}
+                      {holding.isOverlap &&
+                        ` · ${holding.fundCount} 只基金重合`}
+                    </span>
+                    <div>
+                      <i
+                        style={{
+                          width: `${Math.max(2, (holding.estimatedPortfolioWeightPercent / maxWeight) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <strong className="lookthrough-weight">
+                    {holding.estimatedPortfolioWeightPercent.toFixed(2)}%
+                    <small>组合估算</small>
+                  </strong>
+                </div>
+              ))}
+            </div>
+            <div className="disclosure-sources">
+              {result?.funds.map((fund) => (
+                <a
+                  key={fund.fundCode}
+                  href={fund.source.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <span>
+                    {fund.fundName} · {fund.reportPeriod}（截至{" "}
+                    {fund.reportDate}）
+                  </span>
+                  <ExternalLink size={14} />
+                </a>
+              ))}
+            </div>
+            <p className="feature-disclaimer">{result?.notice}</p>
+          </>
+        ) : (
+          <div className="feature-empty compact">
+            <strong>
+              {loading ? "正在读取季度持仓披露…" : "暂无可穿透的基金持仓"}
+            </strong>
+            <span>需要当前持有带六位代码的基金或 ETF。</span>
           </div>
-          <div className="disclosure-sources">
-            {result?.funds.map((fund) => (
-              <a
-                key={fund.fundCode}
-                href={fund.source.url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <span>
-                  {fund.fundName} · {fund.reportPeriod}（截至 {fund.reportDate}
-                  ）
-                </span>
-                <ExternalLink size={14} />
-              </a>
-            ))}
-          </div>
-          <p className="feature-disclaimer">{result?.notice}</p>
-        </>
-      ) : (
-        <div className="feature-empty compact">
-          <strong>
-            {loading ? "正在读取季度持仓披露…" : "暂无可穿透的基金持仓"}
-          </strong>
-          <span>需要当前持有带六位代码的基金或 ETF。</span>
-        </div>
-      )}
-    </section>
+        )}
+      </section>
+      <CompanyEarningsTracker
+        discovered={discoveredCompanies}
+        totalAssets={totalAssets}
+      />
+    </>
   );
 }
 

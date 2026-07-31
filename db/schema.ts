@@ -188,6 +188,35 @@ export const paperTrades = sqliteTable(
   ],
 );
 
+export const companyWatchlist = sqliteTable(
+  "company_watchlist",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    symbol: text("symbol").notNull(),
+    name: text("name").notNull(),
+    market: text("market").notNull().default("US"),
+    source: text("source").notNull().default("AUTO"),
+    status: text("status").notNull().default("ACTIVE"),
+    holdingRank: integer("holding_rank").notNull().default(0),
+    estimatedWeightBps: integer("estimated_weight_bps").notNull().default(0),
+    notes: text("notes").notNull().default(""),
+    lastDiscoveredAt: text("last_discovered_at").notNull().default(""),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("company_watchlist_symbol_idx").on(table.symbol),
+    index("company_watchlist_status_rank_idx").on(
+      table.status,
+      table.holdingRank,
+    ),
+  ],
+);
+
 export const appMeta = sqliteTable("app_meta", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

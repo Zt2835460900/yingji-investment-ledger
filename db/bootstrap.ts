@@ -117,6 +117,21 @@ const schemaStatements = [
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS paper_trades_account_date_idx ON paper_trades(account_id, trade_date)`,
+  `CREATE TABLE IF NOT EXISTS company_watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    market TEXT NOT NULL DEFAULT 'US',
+    source TEXT NOT NULL DEFAULT 'AUTO',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    holding_rank INTEGER NOT NULL DEFAULT 0,
+    estimated_weight_bps INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    last_discovered_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE INDEX IF NOT EXISTS company_watchlist_status_rank_idx ON company_watchlist(status, holding_rank)`,
   `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 ];
 
