@@ -67,6 +67,7 @@ import {
   accountInstrumentDeletionSuccess,
   type AccountInstrumentDeletionCounts,
 } from "@/lib/account-instrument-deletion";
+import { quantityFromAmount } from "@/lib/money";
 
 type View =
   | "overview"
@@ -3658,9 +3659,13 @@ function ModalForm({
     : 0;
   const [confirmationIsAuto, setConfirmationIsAuto] = useState(!editingEntry);
   const [priceIsAuto, setPriceIsAuto] = useState(!editingEntry);
-  const [amountIsAuto, setAmountIsAuto] = useState(
+  const [entryCalculationBasis, setEntryCalculationBasis] = useState<
+    "QUANTITY" | "AMOUNT" | "MANUAL"
+  >(
     !editingEntry ||
-      Math.abs(editingCalculatedAmount - editingSavedAmount) < 0.005,
+      Math.abs(editingCalculatedAmount - editingSavedAmount) < 0.005
+      ? "QUANTITY"
+      : "MANUAL",
   );
   const [feeIsAuto, setFeeIsAuto] = useState(
     !editingEntry || editingEntry.fee_source !== "ACTUAL",
@@ -3977,7 +3982,14 @@ function ModalForm({
     form.preferredProductType,
     type,
   ]);
-  const calculatedAmount = Number(form.quantity || 0) * Number(form.price || 0);
+  const amountIsAuto = entryCalculationBasis === "QUANTITY";
+  const quantityIsAuto = entryCalculationBasis === "AMOUNT";
+  const displayedQuantity =
+    quantityIsAuto && ["BUY", "SELL"].includes(form.kind)
+      ? quantityFromAmount(form.amount, form.price)
+      : (form.quantity ?? "");
+  const calculatedAmount =
+    Number(displayedQuantity || 0) * Number(form.price || 0);
   const grossPreview = amountIsAuto
     ? calculatedAmount
     : Number(form.amount || 0);
@@ -4216,6 +4228,7 @@ function ModalForm({
       }
     }
     if (type === "entry" && ["BUY", "SELL"].includes(form.kind)) {
+      payload.quantity = displayedQuantity;
       if (amountIsAuto) payload.amount = "";
       if (feeIsAuto) payload.fee = "";
       payload.confirmationDate = displayedConfirmationDate;
@@ -4374,7 +4387,7 @@ function ModalForm({
                         }));
                         setConfirmationIsAuto(true);
                         setPriceIsAuto(true);
-                        setAmountIsAuto(true);
+                        setEntryCalculationBasis("QUANTITY");
                         setFeeIsAuto(true);
                         setResolvedInstrument(null);
                         setFundCategory("");
@@ -4519,10 +4532,17 @@ function ModalForm({
                         required
                         inputMode="decimal"
                         placeholder="0.000000"
-                        value={form.quantity ?? ""}
-                        onChange={(e) => set("quantity", e.target.value)}
+                        value={displayedQuantity}
+                        onChange={(e) => {
+                          setEntryCalculationBasis("QUANTITY");
+                          set("quantity", e.target.value);
+                        }}
                       />
-                      <small>份额属于个人成交数据，请按成交确认单填写</small>
+                      <small>
+                        {quantityIsAuto
+                          ? "已按金额 ÷ 净值自动计算到 6 位小数；仍可直接修改份额"
+                          : "修改份额后，成交金额会按份额 × 净值自动计算"}
+                      </small>
                     </Field>
                     <Field label="成交价格 / 净值">
                       <input
@@ -4556,14 +4576,18 @@ function ModalForm({
                     placeholder="0.00"
                     value={displayedAmount}
                     onChange={(e) => {
-                      setAmountIsAuto(!e.target.value.trim());
+                      setEntryCalculationBasis(
+                        e.target.value.trim() ? "AMOUNT" : "QUANTITY",
+                      );
                       set("amount", e.target.value);
                     }}
                   />
                   <small>
                     {amountIsAuto
-                      ? "已按份额 × 净值自动计算；保存时服务器使用完整精度"
-                      : "已使用手工成交金额；清空可恢复自动计算"}
+                      ? "已按份额 × 净值自动计算；保存时服务器使用完整精度，仍可直接修改金额"
+                      : quantityIsAuto
+                        ? "修改金额后，份额会按金额 ÷ 净值自动计算；保存时保留该成交金额"
+                        : "当前保留已保存的手工金额；修改份额或金额即可恢复自动联动"}
                   </small>
                 </Field>
                 {["BUY", "SELL", "DIVIDEND"].includes(form.kind) && (

@@ -18,6 +18,7 @@ import {
   MONEY_SCALE,
   PRICE_SCALE,
   QUANTITY_SCALE,
+  quantityFromAmount,
   tradeGrossUnits,
 } from "../lib/money";
 import type {
@@ -53,6 +54,13 @@ test("scaled integer helpers avoid floating-point storage drift", () => {
     tradeGrossUnits(1 * QUANTITY_SCALE, 2_846_000),
     2.846 * MONEY_SCALE,
   );
+});
+
+test("amount and NAV calculate a six-decimal share quantity", () => {
+  assert.equal(quantityFromAmount("100", "1.234567"), "81.000059");
+  assert.equal(quantityFromAmount("4500", "2.25"), "2000");
+  assert.equal(quantityFromAmount("", "2.25"), "");
+  assert.equal(quantityFromAmount("100", "0"), "");
 });
 
 test("fund profile parsing and classification use the published category", () => {
