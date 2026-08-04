@@ -13,6 +13,10 @@ Environment=WRANGLER_LOG_PATH=/var/lib/yingji/wrangler.log
 ExecStart=/opt/yingji/current/node_modules/.bin/wrangler dev --config wrangler.json --persist-to /var/lib/yingji/state --ip 127.0.0.1 --port 8787 --log-level warn
 Restart=always
 RestartSec=5
+RuntimeMaxSec=12h
+MemoryMax=2G
+MemorySwapMax=1G
+OOMPolicy=kill
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

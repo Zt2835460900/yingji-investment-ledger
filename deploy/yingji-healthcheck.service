@@ -5,4 +5,4 @@ After=network-online.target yingji.service
 [Service]
 Type=oneshot
 User=root
-ExecStart=/opt/yingji/current/deploy/yingji-healthcheck.sh
+ExecStart=/usr/bin/bash /opt/yingji/current/deploy/yingji-healthcheck.sh
