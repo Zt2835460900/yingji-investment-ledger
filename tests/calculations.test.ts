@@ -942,6 +942,8 @@ test("platform position calibration reproduces authoritative shares, cost and pr
   closeTo(result.metrics.totalAssets, 1_836.752432);
   closeTo(result.metrics.totalProfit, 6.752432);
   closeTo(result.metrics.todayProfit, -5.57753);
+  assert.ok(result.risk.observationDays < 30);
+  assert.equal(result.risk.sharpe, null);
   closeTo(
     result.metrics.totalAssets,
     result.metrics.netContributions + result.metrics.totalProfit,

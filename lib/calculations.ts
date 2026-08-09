@@ -471,22 +471,30 @@ export function calculatePortfolio(
   const dailyReturns = series
     .map((item) => item.dailyReturn)
     .filter((value) => Number.isFinite(value));
+  // Fund NAVs are not published on weekends and holidays. Treating every
+  // carried-forward zero as a new daily observation dilutes volatility and
+  // makes annualized Sharpe look more precise than the underlying data.
+  const observedReturns = dailyReturns.filter(
+    (value) => Math.abs(value) > 1e-12,
+  );
+  const observationDays = observedReturns.length;
   const mean =
-    dailyReturns.reduce((sum, value) => sum + value, 0) /
-    Math.max(1, dailyReturns.length);
+    observedReturns.reduce((sum, value) => sum + value, 0) /
+    Math.max(1, observationDays);
   const variance =
-    dailyReturns.length > 1
-      ? dailyReturns.reduce(
+    observationDays > 1
+      ? observedReturns.reduce(
           (sum, value) => sum + Math.pow(value - mean, 2),
           0,
         ) /
-        (dailyReturns.length - 1)
+        (observationDays - 1)
       : 0;
   const volatility = Math.sqrt(variance) * Math.sqrt(252);
-  const sharpe = volatility ? (mean * 252) / volatility : 0;
+  const sharpe =
+    observationDays >= 30 && volatility ? (mean * 252) / volatility : null;
   const maxDrawdown = Math.min(0, ...series.map((item) => item.drawdown));
-  const positiveDays = dailyReturns.filter((value) => value > 0).length;
-  const negativeDays = dailyReturns.filter((value) => value < 0).length;
+  const positiveDays = observedReturns.filter((value) => value > 0).length;
+  const negativeDays = observedReturns.filter((value) => value < 0).length;
 
   const monthMap = new Map<
     string,
@@ -699,6 +707,7 @@ export function calculatePortfolio(
       volatility,
       sharpe,
       maxDrawdown,
+      observationDays,
       positiveDays,
       negativeDays,
       winRate:

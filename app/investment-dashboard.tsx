@@ -110,8 +110,9 @@ interface PortfolioData {
   };
   risk: {
     volatility: number;
-    sharpe: number;
+    sharpe: number | null;
     maxDrawdown: number;
+    observationDays: number;
     positiveDays: number;
     negativeDays: number;
     winRate: number;
@@ -1194,24 +1195,24 @@ function Overview({
           icon={CircleDollarSign}
         />
         <MetricCard
-          label="未实现收益"
+          label="持仓浮动盈亏"
           value={`¥ ${money(m.unrealized)}`}
-          footnote="按最新价格估值"
+          footnote={`${data.holdings.length} 项持仓按最新净值合计`}
           tone={m.unrealized >= 0 ? "positive" : "negative"}
           icon={Activity}
         />
         <MetricCard
-          label="最大回撤"
-          value={percent(data.risk.maxDrawdown)}
-          footnote="基于日频 TWR 财富指数"
-          tone="negative"
-          icon={TrendingDown}
+          label="持仓总成本"
+          value={`¥ ${money(m.holdingCost)}`}
+          footnote="平台校准成本与后续交易成本"
+          icon={WalletCards}
         />
         <MetricCard
-          label="夏普比率"
-          value={data.risk.sharpe.toFixed(2)}
-          footnote="无风险利率暂按 0%"
-          icon={Gauge}
+          label="账本收益率"
+          value={percent(m.bookReturnRate)}
+          footnote="累计总盈利 ÷ 累计净投入"
+          tone={(m.bookReturnRate ?? 0) >= 0 ? "positive" : "negative"}
+          icon={TrendingUp}
         />
       </section>
       <section className="panel feature-toolbox-panel">
@@ -3138,7 +3139,14 @@ function Analytics({
               </div>
               <div>
                 <span>夏普比率</span>
-                <strong>{data.risk.sharpe.toFixed(2)}</strong>
+                <strong>
+                  {data.risk.sharpe === null
+                    ? "样本不足"
+                    : data.risk.sharpe.toFixed(2)}
+                </strong>
+                <small>
+                  {data.risk.observationDays} 个有效估值日，至少 30 个才年化
+                </small>
               </div>
               <div>
                 <span>手续费</span>
