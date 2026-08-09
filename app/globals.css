@@ -1342,6 +1342,44 @@ select:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ledger-reconciliation-alert {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 14px 16px;
+  color: #8b571c;
+  border: 1px solid #f0d29f;
+  border-radius: 14px;
+  background: #fff8e9;
+}
+.ledger-reconciliation-alert > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.ledger-reconciliation-alert div {
+  display: grid;
+  gap: 4px;
+}
+.ledger-reconciliation-alert strong {
+  color: #754712;
+  font-size: 12px;
+}
+.ledger-reconciliation-alert span {
+  font-size: 10px;
+  line-height: 1.55;
+}
+.ledger-reconciliation-alert button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 7px 11px;
+  color: #754712;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid #e4bf80;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
 .search-box {
   height: 39px;
   width: min(360px, 42vw);
@@ -1397,6 +1435,10 @@ tbody tr {
 tbody tr:hover {
   background: #fafbfe;
 }
+tbody tr.needs-reconciliation,
+tbody tr.needs-reconciliation:hover {
+  background: #fffaf0;
+}
 tbody tr:last-child td {
   border-bottom: 0;
 }
@@ -1424,6 +1466,12 @@ td small {
 }
 .fee-cell {
   color: #9b672c;
+}
+.reconciliation-gap {
+  margin-top: 4px;
+  color: #b26b19;
+  font-weight: 650;
+  white-space: nowrap;
 }
 .ledger-product-cell {
   min-width: 235px;

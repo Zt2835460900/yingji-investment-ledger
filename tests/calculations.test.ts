@@ -577,10 +577,34 @@ test("an open profitable holding is included in total assets", () => {
   assert.equal(result.metrics.totalAssets, 1_200);
   assert.equal(result.metrics.unrealized, 200);
   assert.equal(result.metrics.totalProfit, 200);
+  assert.equal(result.metrics.bookReturnRate, 0.2);
   assert.equal(
     result.metrics.totalAssets,
     result.metrics.netContributions + result.metrics.totalProfit,
   );
+});
+
+test("latest valuation-day profit does not become zero on later closed days", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", {
+        date: "2026-07-15",
+        quantity: 100,
+        price: 10,
+      }),
+    ],
+    [
+      accountingPrice(1, 10, "2026-07-15"),
+      accountingPrice(2, 12, "2026-07-18"),
+    ],
+    [],
+    [],
+  );
+
+  assert.equal(result.latestValuationDate, "2026-07-18");
+  assert.equal(result.metrics.todayProfit, 200);
 });
 
 test("break-even progress includes buy fees for a losing holding", () => {

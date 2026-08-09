@@ -535,6 +535,14 @@ export function calculatePortfolio(
   ).length;
   const valuationDate = holdingPriceDates.at(0) ?? null;
   const latestValuationDate = holdingPriceDates.at(-1) ?? null;
+  const latestValuationIndex = latestValuationDate
+    ? series.findIndex((item) => item.date === latestValuationDate)
+    : -1;
+  const latestValuationProfit =
+    latestValuationIndex > 0
+      ? series[latestValuationIndex]!.profit -
+        series[latestValuationIndex - 1]!.profit
+      : 0;
 
   return {
     metrics: {
@@ -546,14 +554,15 @@ export function calculatePortfolio(
       withdrawals,
       netContributions,
       totalProfit,
+      bookReturnRate:
+        netContributions !== 0 ? totalProfit / netContributions : null,
       realized,
       unrealized,
       income,
       fees,
       twr: series.at(-1)?.twr ?? 0,
       xirr: personalXirr,
-      todayProfit:
-        series.length > 1 ? series.at(-1)!.profit - series.at(-2)!.profit : 0,
+      todayProfit: latestValuationProfit,
     },
     risk: {
       volatility,

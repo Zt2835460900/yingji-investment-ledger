@@ -67,6 +67,7 @@ import {
   accountInstrumentDeletionSuccess,
   type AccountInstrumentDeletionCounts,
 } from "@/lib/account-instrument-deletion";
+import { reconcileTradeEntry } from "@/lib/ledger-reconciliation";
 import { quantityFromAmount } from "@/lib/money";
 
 type View =
@@ -87,6 +88,7 @@ interface PortfolioData {
     withdrawals: number;
     netContributions: number;
     totalProfit: number;
+    bookReturnRate: number | null;
     realized: number;
     unrealized: number;
     income: number;
@@ -261,6 +263,12 @@ interface PortfolioData {
   };
   methodology: string;
 }
+
+const tradeReconciliationIssues = (entries: PortfolioData["ledger"]) =>
+  entries.flatMap((entry) => {
+    const result = reconcileTradeEntry(entry);
+    return result?.needsReview ? [{ entry, result }] : [];
+  });
 
 interface MarketNewsFeed {
   items: Array<{
@@ -1013,6 +1021,11 @@ function Overview({
     -monthlyAbsMax * 1.18,
     monthlyAbsMax * 1.18,
   ];
+  const reconciliationIssues = tradeReconciliationIssues(data.ledger);
+  const estimatedProfitBias = reconciliationIssues.reduce(
+    (sum, item) => sum + item.result.gap,
+    0,
+  );
   return (
     <div className="page-grid overview-page">
       <section className="hero-balance">
@@ -1060,9 +1073,9 @@ function Overview({
             </strong>
           </div>
           <div>
-            <span>累计 TWR</span>
-            <strong className={m.twr >= 0 ? "up" : "down"}>
-              {percent(m.twr)}
+            <span>账面收益率</span>
+            <strong className={(m.bookReturnRate ?? 0) >= 0 ? "up" : "down"}>
+              {percent(m.bookReturnRate)}
             </strong>
           </div>
           <div>
@@ -1070,7 +1083,11 @@ function Overview({
             <strong>{percent(m.xirr)}</strong>
           </div>
           <div>
-            <span>最新日盈亏</span>
+            <span>
+              {data.latestValuationDate
+                ? `${dateText(data.latestValuationDate)} 估值日盈亏`
+                : "最新估值日盈亏"}
+            </span>
             <strong className={m.todayProfit >= 0 ? "up" : "down"}>
               {m.todayProfit >= 0 ? "+" : ""}¥{money(m.todayProfit)}
             </strong>
@@ -1098,6 +1115,23 @@ function Overview({
           </ResponsiveContainer>
         </div>
       </section>
+      {reconciliationIssues.length > 0 && (
+        <section className="ledger-reconciliation-alert" role="alert">
+          <AlertTriangle size={20} />
+          <div>
+            <strong>累计盈利暂需核对</strong>
+            <span>
+              {reconciliationIssues.length} 笔流水金额与份额 ×
+              净值不一致，当前盈利可能
+              {estimatedProfitBias >= 0 ? "多算" : "少算"} ¥
+              {money(Math.abs(estimatedProfitBias))}。
+            </span>
+          </div>
+          <button type="button" onClick={() => onNavigate("ledger")}>
+            查看并修正
+          </button>
+        </section>
+      )}
       <section className="metric-grid">
         <MetricCard
           label="已实现收益"
@@ -1797,6 +1831,14 @@ function Ledger({
       (entry.kind === "FEE" ? entry.gross_amount_units / 10_000 : 0),
     0,
   );
+  const reconciliationIssues = tradeReconciliationIssues(data.ledger);
+  const reconciliationById = new Map(
+    reconciliationIssues.map((item) => [item.entry.id, item.result]),
+  );
+  const estimatedProfitBias = reconciliationIssues.reduce(
+    (sum, item) => sum + item.result.gap,
+    0,
+  );
   return (
     <div className="stack-page">
       <div className="toolbar">
@@ -1849,6 +1891,22 @@ function Ledger({
           <strong>¥{money(expenseTotal)}</strong>
         </div>
       </section>
+      {reconciliationIssues.length > 0 && (
+        <section className="ledger-reconciliation-alert" role="alert">
+          <AlertTriangle size={20} />
+          <div>
+            <strong>
+              发现 {reconciliationIssues.length} 笔流水的金额、净值和份额不一致
+            </strong>
+            <span>
+              当前累计盈利可能
+              {estimatedProfitBias >= 0 ? "多算" : "少算"} ¥
+              {money(Math.abs(estimatedProfitBias))}
+              。请编辑标红流水，并以成交确认单为准。
+            </span>
+          </div>
+        </section>
+      )}
       <section className="panel table-panel">
         <div className="table-scroll">
           <table>
@@ -1872,8 +1930,12 @@ function Ledger({
                 const account = data.accounts.find(
                   (item) => item.id === entry.account_id,
                 );
+                const reconciliation = reconciliationById.get(entry.id);
                 return (
-                  <tr key={entry.id}>
+                  <tr
+                    key={entry.id}
+                    className={reconciliation ? "needs-reconciliation" : ""}
+                  >
                     <td data-label="交易日期">
                       <div className="ledger-cell-stack">
                         <strong>{entry.trade_date}</strong>
@@ -1914,6 +1976,13 @@ function Ledger({
                       className="number-cell numeric-cell"
                     >
                       ¥{money(entry.gross_amount_units / 10_000)}
+                      {reconciliation && (
+                        <small className="reconciliation-gap">
+                          份额 × 净值为 ¥
+                          {money(reconciliation.calculatedAmount)}，相差 ¥
+                          {money(Math.abs(reconciliation.gap))}
+                        </small>
+                      )}
                     </td>
                     <td
                       data-label="手续费 / 税费"
