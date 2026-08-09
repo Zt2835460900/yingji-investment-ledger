@@ -25,9 +25,16 @@ import type {
   AccountRow,
   InstrumentRow,
   LedgerRow,
+  PositionOverrideRow,
   PriceRow,
   TargetRow,
 } from "../lib/types";
+
+const closeTo = (actual: number, expected: number, tolerance = 1e-6) =>
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    `${actual} should be within ${tolerance} of ${expected}`,
+  );
 
 test("XIRR matches a one-year 10% return", () => {
   const result = calculateXirr([
@@ -861,4 +868,82 @@ test("valuation freshness is derived conservatively from held instruments", () =
   assert.equal(result.valuationDate, "2026-07-16");
   assert.equal(result.latestValuationDate, "2026-07-17");
   assert.equal(result.missingPriceCount, 1);
+});
+
+test("platform position calibration reproduces authoritative shares, cost and profit", () => {
+  const secondAccount: AccountRow = {
+    ...accountingAccount,
+    id: 2,
+    name: "S&P 500 account",
+  };
+  const nasdaqBuy = accountingEntry(1, "BUY", {
+    date: "2026-07-24",
+    instrumentId: 1,
+    quantity: 655.121192,
+    gross: 1_500,
+  });
+  const spBuy: LedgerRow = {
+    ...accountingEntry(2, "BUY", {
+      date: "2026-07-24",
+      instrumentId: 2,
+      quantity: 192.621933,
+      gross: 320.13,
+    }),
+    account_id: 2,
+  };
+  const overrides: PositionOverrideRow[] = [
+    {
+      id: 1,
+      account_id: 1,
+      instrument_id: 1,
+      quantity_units: 656.18 * QUANTITY_SCALE,
+      cost_units: 1_500 * MONEY_SCALE,
+      as_of_date: "2026-08-07",
+      notes: "Fund app screenshot",
+      created_at: "2026-08-09 00:00:00",
+      updated_at: "2026-08-09 00:00:00",
+    },
+    {
+      id: 2,
+      account_id: 2,
+      instrument_id: 2,
+      quantity_units: 197.39 * QUANTITY_SCALE,
+      cost_units: 330 * MONEY_SCALE,
+      as_of_date: "2026-08-06",
+      notes: "Fund app screenshot",
+      created_at: "2026-08-09 00:00:00",
+      updated_at: "2026-08-09 00:00:00",
+    },
+  ];
+  const result = calculatePortfolio(
+    [accountingAccount, secondAccount],
+    [accountingInstrument(1), accountingInstrument(2)],
+    [nasdaqBuy, spBuy],
+    [
+      accountingPrice(1, 2.2923, "2026-08-06", 1),
+      accountingPrice(2, 2.2838, "2026-08-07", 1),
+      accountingPrice(3, 1.7132, "2026-08-06", 2),
+    ],
+    [],
+    [],
+    overrides,
+  );
+
+  const nasdaq = result.holdings.find((item) => item.instrumentId === 1)!;
+  const sp = result.holdings.find((item) => item.instrumentId === 2)!;
+  closeTo(nasdaq.quantity, 656.18);
+  closeTo(nasdaq.marketValue, 1_498.583884);
+  closeTo(nasdaq.unrealized, -1.416116);
+  closeTo(sp.quantity, 197.39);
+  closeTo(sp.marketValue, 338.168548);
+  closeTo(sp.unrealized, 8.168548);
+  closeTo(result.metrics.calibrationAdjustment, 9.87);
+  closeTo(result.metrics.netContributions, 1_830);
+  closeTo(result.metrics.totalAssets, 1_836.752432);
+  closeTo(result.metrics.totalProfit, 6.752432);
+  closeTo(result.metrics.todayProfit, -5.57753);
+  closeTo(
+    result.metrics.totalAssets,
+    result.metrics.netContributions + result.metrics.totalProfit,
+  );
 });

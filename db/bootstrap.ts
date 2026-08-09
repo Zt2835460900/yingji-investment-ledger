@@ -83,6 +83,19 @@ const schemaStatements = [
     target_bps INTEGER NOT NULL,
     alert_bps INTEGER NOT NULL DEFAULT 500
   )`,
+  `CREATE TABLE IF NOT EXISTS position_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    instrument_id INTEGER NOT NULL,
+    quantity_units INTEGER NOT NULL,
+    cost_units INTEGER NOT NULL,
+    as_of_date TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(account_id, instrument_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS position_overrides_date_idx ON position_overrides(as_of_date)`,
   `CREATE TABLE IF NOT EXISTS investment_journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,

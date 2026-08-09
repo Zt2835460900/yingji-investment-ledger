@@ -3713,6 +3713,52 @@ td small {
   display: block;
   font-weight: 650;
 }
+.holding-calibration {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 11px;
+  padding: 10px 11px;
+  border: 1px solid #dbe3fb;
+  border-radius: 10px;
+  background: #f6f8ff;
+}
+.holding-calibration > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+.holding-calibration strong {
+  color: #455a96;
+  font-size: 12px;
+}
+.holding-calibration span {
+  color: #7b8497;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.holding-calibration-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+.holding-calibration-actions button {
+  min-height: 34px;
+  padding: 6px 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.holding-calibration-actions .text-danger {
+  color: #c74755;
+  border: 1px solid #f0cbd0;
+  background: #fff7f8;
+}
 .delete-holding-button {
   min-height: 38px;
   margin-top: 10px;
@@ -3740,6 +3786,14 @@ td small {
 }
 
 @media (max-width: 680px) {
+  .holding-calibration,
+  .holding-calibration-actions {
+    flex-direction: column;
+  }
+  .holding-calibration-actions,
+  .holding-calibration-actions button {
+    width: 100%;
+  }
   .delete-holding-button {
     width: 100%;
     min-height: 44px;

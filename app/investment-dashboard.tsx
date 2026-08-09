@@ -79,7 +79,14 @@ type View =
   | "allocation"
   | "analytics"
   | "data";
-type Modal = "entry" | "account" | "instrument" | "plan" | "price" | null;
+type Modal =
+  | "entry"
+  | "account"
+  | "instrument"
+  | "plan"
+  | "price"
+  | "positionOverride"
+  | null;
 
 interface PortfolioData {
   metrics: {
@@ -99,6 +106,7 @@ interface PortfolioData {
     securitiesValue: number;
     cash: number;
     holdingCost: number;
+    calibrationAdjustment: number;
   };
   risk: {
     volatility: number;
@@ -188,6 +196,22 @@ interface PortfolioData {
     breakEvenPrice: number;
     toBreakEvenRate: number | null;
     breakEvenProgress: number;
+    calibrationId: number | null;
+    calibrationDate: string | null;
+    calibrationNotes: string;
+    ledgerQuantityAtCalibration: number | null;
+    ledgerCostAtCalibration: number | null;
+  }>;
+  positionOverrides: Array<{
+    id: number;
+    account_id: number;
+    instrument_id: number;
+    quantity_units: number;
+    cost_units: number;
+    as_of_date: string;
+    notes: string;
+    created_at: string;
+    updated_at: string;
   }>;
   plans: Array<{
     id: number;
@@ -584,6 +608,12 @@ export function InvestmentDashboard() {
   const [editingPlan, setEditingPlan] = useState<
     PortfolioData["plans"][number] | null
   >(null);
+  const [editingPositionOverride, setEditingPositionOverride] = useState<
+    PortfolioData["positionOverrides"][number] | null
+  >(null);
+  const [calibrationHolding, setCalibrationHolding] = useState<
+    PortfolioData["holdings"][number] | null
+  >(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -697,6 +727,8 @@ export function InvestmentDashboard() {
       setEditingInstrument(null);
       setEditingPrice(null);
       setEditingPlan(null);
+      setEditingPositionOverride(null);
+      setCalibrationHolding(null);
       setToast(typeof success === "function" ? success(result) : success);
       window.setTimeout(() => setToast(""), 2600);
       return true;
@@ -756,6 +788,23 @@ export function InvestmentDashboard() {
                 deletedEntries: result.deletedEntries ?? 0,
                 deletedPlans: result.deletedPlans ?? 0,
               }),
+          )
+        }
+        onCalibrate={(holding) => {
+          setCalibrationHolding(holding);
+          setEditingPositionOverride(
+            data.positionOverrides.find(
+              (item) =>
+                item.account_id === holding.accountId &&
+                item.instrument_id === holding.instrumentId,
+            ) ?? null,
+          );
+          setModal("positionOverride");
+        }}
+        onDeleteCalibration={(id) =>
+          void submit(
+            { action: "deletePositionOverride", id },
+            "持仓校准已删除，收益已按原始流水重新计算",
           )
         }
       />
@@ -939,6 +988,8 @@ export function InvestmentDashboard() {
           editingInstrument={editingInstrument}
           editingPrice={editingPrice}
           editingPlan={editingPlan}
+          editingPositionOverride={editingPositionOverride}
+          calibrationHolding={calibrationHolding}
           busy={busy}
           error={error}
           onClose={() => {
@@ -948,6 +999,8 @@ export function InvestmentDashboard() {
             setEditingInstrument(null);
             setEditingPrice(null);
             setEditingPlan(null);
+            setEditingPositionOverride(null);
+            setCalibrationHolding(null);
             setError("");
           }}
           submit={submit}
@@ -1453,6 +1506,8 @@ function Accounts({
   onEdit,
   onDelete,
   onDeleteInstrument,
+  onCalibrate,
+  onDeleteCalibration,
   busy,
 }: {
   data: PortfolioData;
@@ -1460,6 +1515,8 @@ function Accounts({
   onEdit: (account: PortfolioData["accounts"][number]) => void;
   onDelete: (id: number) => void;
   onDeleteInstrument: (accountId: number, instrumentId: number) => void;
+  onCalibrate: (holding: PortfolioData["holdings"][number]) => void;
+  onDeleteCalibration: (id: number) => void;
   busy: boolean;
 }) {
   const [filter, setFilter] = useState<"ALL" | "PROFIT" | "LOSS">("ALL");
@@ -1680,6 +1737,47 @@ function Accounts({
                               ? `当前净值还需上涨 ${(position.toBreakEvenRate * 100).toFixed(2)}% 回本`
                               : `当前价格高于回本线 ${Math.abs(position.toBreakEvenRate * 100).toFixed(2)}%`}
                         </small>
+                      </div>
+                      <div className="holding-calibration">
+                        <div>
+                          <strong>
+                            {position.calibrationId
+                              ? `已按平台校准 · ${position.calibrationDate}`
+                              : "平台份额 / 成本校准"}
+                          </strong>
+                          <span>
+                            {position.calibrationId
+                              ? `流水原值 ${position.ledgerQuantityAtCalibration?.toFixed(6) ?? "0"} 份 / ¥${money(position.ledgerCostAtCalibration ?? 0)}`
+                              : "平台持仓与流水有误差时，以确认份额和持仓成本重新计算盈利"}
+                          </span>
+                        </div>
+                        <div className="holding-calibration-actions">
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={busy}
+                            onClick={() => onCalibrate(position)}
+                          >
+                            <Pencil size={14} />
+                            {position.calibrationId ? "编辑校准" : "校准持仓"}
+                          </button>
+                          {position.calibrationId && (
+                            <button
+                              type="button"
+                              className="text-danger"
+                              disabled={busy}
+                              onClick={() =>
+                                confirm(
+                                  `确认删除“${position.instrumentName}”的持仓校准？删除后将恢复按原始流水计算。`,
+                                ) &&
+                                onDeleteCalibration(position.calibrationId!)
+                              }
+                            >
+                              <Trash2 size={14} />
+                              删除校准
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <button
                         type="button"
@@ -3579,6 +3677,8 @@ function ModalForm({
   editingInstrument,
   editingPrice,
   editingPlan,
+  editingPositionOverride,
+  calibrationHolding,
   busy,
   error,
   onClose,
@@ -3591,6 +3691,8 @@ function ModalForm({
   editingInstrument: PortfolioData["instruments"][number] | null;
   editingPrice: PortfolioData["prices"][number] | null;
   editingPlan: PortfolioData["plans"][number] | null;
+  editingPositionOverride: PortfolioData["positionOverrides"][number] | null;
+  calibrationHolding: PortfolioData["holdings"][number] | null;
   busy: boolean;
   error: string;
   onClose: () => void;
@@ -3614,23 +3716,31 @@ function ModalForm({
   const [form, setForm] = useState<Record<string, string>>({
     kind: editingEntry?.kind ?? "BUY",
     accountId: String(
-      type === "entry" && editingEntry
-        ? editingEntry.account_id
-        : type === "plan"
-          ? (editingPlan?.account_id ??
-            initialPlanAccount?.id ??
-            data.accounts[0]?.id ??
+      type === "positionOverride"
+        ? (editingPositionOverride?.account_id ??
+            calibrationHolding?.accountId ??
             "")
-          : (data.accounts[0]?.id ?? ""),
+        : type === "entry" && editingEntry
+          ? editingEntry.account_id
+          : type === "plan"
+            ? (editingPlan?.account_id ??
+              initialPlanAccount?.id ??
+              data.accounts[0]?.id ??
+              "")
+            : (data.accounts[0]?.id ?? ""),
     ),
     instrumentId: String(
-      type === "entry" && editingEntry
-        ? (editingEntry.instrument_id ?? "")
-        : type === "price" && editingPrice
-          ? editingPrice.instrument_id
-          : type === "plan"
-            ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
-            : (data.instruments[0]?.id ?? ""),
+      type === "positionOverride"
+        ? (editingPositionOverride?.instrument_id ??
+            calibrationHolding?.instrumentId ??
+            "")
+        : type === "entry" && editingEntry
+          ? (editingEntry.instrument_id ?? "")
+          : type === "price" && editingPrice
+            ? editingPrice.instrument_id
+            : type === "plan"
+              ? (editingPlan?.instrument_id ?? initialPlanInstrument?.id ?? "")
+              : (data.instruments[0]?.id ?? ""),
     ),
     instrumentCode:
       type === "entry" && editingEntry
@@ -3645,9 +3755,16 @@ function ModalForm({
         : "FUND",
     tradeDate: editingEntry?.trade_date ?? today,
     confirmationDate: editingEntry?.confirmation_date ?? "",
-    quantity: editingEntry
-      ? String(editingEntry.quantity_units / 1_000_000)
-      : "",
+    quantity:
+      type === "positionOverride"
+        ? String(
+            (editingPositionOverride?.quantity_units ??
+              Math.round((calibrationHolding?.quantity ?? 0) * 1_000_000)) /
+              1_000_000,
+          )
+        : editingEntry
+          ? String(editingEntry.quantity_units / 1_000_000)
+          : "",
     price: editingEntry
       ? String(editingEntry.price_units / 1_000_000)
       : editingPrice
@@ -3665,7 +3782,23 @@ function ModalForm({
         : "",
     fee: editingEntry ? String(editingEntry.fee_units / 10_000) : "",
     tax: editingEntry ? String(editingEntry.tax_units / 10_000) : "",
-    notes: editingEntry?.notes ?? "",
+    notes:
+      type === "positionOverride"
+        ? (editingPositionOverride?.notes ?? "按基金平台持仓详情校准")
+        : (editingEntry?.notes ?? ""),
+    cost:
+      type === "positionOverride"
+        ? String(
+            (editingPositionOverride?.cost_units ??
+              Math.round((calibrationHolding?.cost ?? 0) * 10_000)) / 10_000,
+          )
+        : "",
+    asOfDate:
+      type === "positionOverride"
+        ? (editingPositionOverride?.as_of_date ??
+          calibrationHolding?.priceDate ??
+          today)
+        : today,
     externalRef: editingEntry?.external_ref ?? "",
     name: editingAccount?.name ?? editingInstrument?.name ?? "",
     code: editingInstrument?.code ?? "",
@@ -4159,25 +4292,29 @@ function ModalForm({
     }
   };
   const title =
-    type === "entry"
-      ? editingEntry
-        ? "编辑流水"
-        : "新增流水"
-      : type === "account"
-        ? editingAccount
-          ? "编辑投资账户"
-          : "创建投资账户"
-        : type === "instrument"
-          ? editingInstrument
-            ? "编辑基金 / 证券"
-            : "新增基金 / 证券"
-          : type === "plan"
-            ? editingPlan
-              ? "编辑定投计划"
-              : "新建定投计划"
-            : editingPrice
-              ? "编辑价格 / 净值"
-              : "新增价格 / 净值";
+    type === "positionOverride"
+      ? editingPositionOverride
+        ? "编辑持仓校准"
+        : "校准平台持仓"
+      : type === "entry"
+        ? editingEntry
+          ? "编辑流水"
+          : "新增流水"
+        : type === "account"
+          ? editingAccount
+            ? "编辑投资账户"
+            : "创建投资账户"
+          : type === "instrument"
+            ? editingInstrument
+              ? "编辑基金 / 证券"
+              : "新增基金 / 证券"
+            : type === "plan"
+              ? editingPlan
+                ? "编辑定投计划"
+                : "新建定投计划"
+              : editingPrice
+                ? "编辑价格 / 净值"
+                : "新增价格 / 净值";
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (type === "plan" && (lookupBusy || !selectedInstrument)) {
@@ -4187,25 +4324,27 @@ function ModalForm({
       return;
     }
     const action =
-      type === "entry"
-        ? editingEntry
-          ? "updateEntry"
-          : "createEntry"
-        : type === "account"
-          ? editingAccount
-            ? "updateAccount"
-            : "createAccount"
-          : type === "instrument"
-            ? editingInstrument
-              ? "updateInstrument"
-              : "createInstrument"
-            : type === "plan"
-              ? editingPlan
-                ? "updatePlan"
-                : "createPlan"
-              : editingPrice
-                ? "updatePrice"
-                : "upsertPrice";
+      type === "positionOverride"
+        ? "upsertPositionOverride"
+        : type === "entry"
+          ? editingEntry
+            ? "updateEntry"
+            : "createEntry"
+          : type === "account"
+            ? editingAccount
+              ? "updateAccount"
+              : "createAccount"
+            : type === "instrument"
+              ? editingInstrument
+                ? "updateInstrument"
+                : "createInstrument"
+              : type === "plan"
+                ? editingPlan
+                  ? "updatePlan"
+                  : "createPlan"
+                : editingPrice
+                  ? "updatePrice"
+                  : "upsertPrice";
     const payload: Record<string, unknown> = {
       action,
       ...form,
@@ -4214,6 +4353,7 @@ function ModalForm({
       ...(editingInstrument ? { id: editingInstrument.id } : {}),
       ...(editingPrice ? { id: editingPrice.id } : {}),
       ...(editingPlan ? { id: editingPlan.id } : {}),
+      ...(editingPositionOverride ? { id: editingPositionOverride.id } : {}),
     };
     if (type === "entry")
       payload.autoRenameAccount = !editingEntry && form.kind === "BUY";
@@ -4304,21 +4444,23 @@ function ModalForm({
     }
     await submit(
       payload,
-      type === "entry"
-        ? editingEntry
-          ? "流水已更新，份额、净值、金额和收益已重新计算"
-          : form.kind === "BUY"
-            ? "买入流水已保存，账户名称已同步为正式产品名称，收益已重算"
-            : "流水已记入，收益已重算"
-        : type === "account" && editingAccount
-          ? "账户资料已更新"
-          : type === "instrument" && editingInstrument
-            ? "产品资料已更新"
-            : type === "price" && editingPrice
-              ? "估值记录已更新，资产与收益已重算"
-              : editingPlan
-                ? "定投计划已更新"
-                : "已保存",
+      type === "positionOverride"
+        ? "平台份额与持仓成本已校准，金额和盈利已重新计算"
+        : type === "entry"
+          ? editingEntry
+            ? "流水已更新，份额、净值、金额和收益已重新计算"
+            : form.kind === "BUY"
+              ? "买入流水已保存，账户名称已同步为正式产品名称，收益已重算"
+              : "流水已记入，收益已重算"
+          : type === "account" && editingAccount
+            ? "账户资料已更新"
+            : type === "instrument" && editingInstrument
+              ? "产品资料已更新"
+              : type === "price" && editingPrice
+                ? "估值记录已更新，资产与收益已重算"
+                : editingPlan
+                  ? "定投计划已更新"
+                  : "已保存",
     );
   };
   return (
@@ -4338,6 +4480,76 @@ function ModalForm({
           </button>
         </div>
         <div className="modal-body">
+          {type === "positionOverride" && (
+            <div className="form-grid">
+              <Field label="投资账户">
+                <input
+                  readOnly
+                  value={
+                    data.accounts.find(
+                      (item) => item.id === Number(form.accountId),
+                    )?.name ?? ""
+                  }
+                />
+              </Field>
+              <Field label="基金 / 证券">
+                <input
+                  readOnly
+                  value={
+                    data.instruments.find(
+                      (item) => item.id === Number(form.instrumentId),
+                    )?.name ?? ""
+                  }
+                />
+              </Field>
+              <Field label="平台确认持有份额">
+                <input
+                  required
+                  autoFocus
+                  type="number"
+                  min="0.000001"
+                  step="0.000001"
+                  inputMode="decimal"
+                  value={form.quantity}
+                  onChange={(event) => set("quantity", event.target.value)}
+                />
+                <small>填写基金 App 或券商显示的总持有份额</small>
+              </Field>
+              <Field label="平台确认持仓成本（元）">
+                <input
+                  required
+                  type="number"
+                  min="0"
+                  step="0.0001"
+                  inputMode="decimal"
+                  value={form.cost}
+                  onChange={(event) => set("cost", event.target.value)}
+                />
+                <small>填写平台显示的持仓成本，不是当前资产金额</small>
+              </Field>
+              <Field label="校准日期" wide>
+                <input
+                  required
+                  type="date"
+                  value={form.asOfDate}
+                  onChange={(event) => set("asOfDate", event.target.value)}
+                />
+              </Field>
+              <Field label="校准说明" wide>
+                <input
+                  maxLength={200}
+                  value={form.notes}
+                  onChange={(event) => set("notes", event.target.value)}
+                />
+              </Field>
+              <div className="form-note wide">
+                <ShieldCheck size={17} />
+                <span>
+                  校准只覆盖当前持仓计算，不修改历史买卖流水；删除校准后会恢复按原始流水计算。后续新交易仍会继续增减校准后的份额与成本。
+                </span>
+              </div>
+            </div>
+          )}
           {type === "entry" && (
             <>
               <div className="segmented">

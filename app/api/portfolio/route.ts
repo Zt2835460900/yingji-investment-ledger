@@ -45,6 +45,7 @@ import type {
   JournalRow,
   LedgerRow,
   PlanRow,
+  PositionOverrideRow,
   PriceRow,
   TargetRow,
 } from "@/lib/types";
@@ -932,6 +933,7 @@ async function loadPortfolio() {
     prices,
     plans,
     targets,
+    positionOverrides,
     journal,
     purchaseLimits,
     navSyncRows,
@@ -968,6 +970,11 @@ async function loadPortfolio() {
       .all<TargetRow>(),
     d1
       .prepare(
+        "SELECT id, account_id, instrument_id, quantity_units, cost_units, as_of_date, notes, created_at, updated_at FROM position_overrides ORDER BY as_of_date, id",
+      )
+      .all<PositionOverrideRow>(),
+    d1
+      .prepare(
         `SELECT j.id, j.account_id, j.instrument_id, j.entry_date, j.title,
                   j.decision, j.mood, j.thesis, j.review_date, j.review_note,
                   j.created_at, j.updated_at, a.name AS account_name,
@@ -997,6 +1004,7 @@ async function loadPortfolio() {
     prices.results,
     plans.results,
     targets.results,
+    positionOverrides.results,
   );
   const dailyProgress = new Map(
     calculateDailyPlanProgress(
@@ -1589,6 +1597,57 @@ export async function POST(request: Request) {
             .bind(officialAccountName, accountId),
         );
       await d1.batch(entryStatements);
+    } else if (action === "upsertPositionOverride") {
+      const accountId = positiveIntegerId(body.accountId, "账户");
+      const instrumentId = positiveIntegerId(body.instrumentId, "产品");
+      const quantityUnits = decimalToUnits(body.quantity, QUANTITY_SCALE);
+      const costUnits = decimalToUnits(body.cost);
+      const asOfDate = isoDate(body.asOfDate);
+      const notes = String(body.notes ?? "")
+        .trim()
+        .slice(0, 200);
+      if (quantityUnits <= 0) throw new Error("平台确认份额必须大于 0");
+      if (costUnits < 0) throw new Error("平台确认持仓成本不能为负数");
+      const [account, instrument] = await Promise.all([
+        d1
+          .prepare("SELECT id FROM accounts WHERE id = ?")
+          .bind(accountId)
+          .first<{ id: number }>(),
+        d1
+          .prepare("SELECT id FROM instruments WHERE id = ?")
+          .bind(instrumentId)
+          .first<{ id: number }>(),
+      ]);
+      if (!account) throw new Error("账户不存在");
+      if (!instrument) throw new Error("产品不存在");
+      await d1
+        .prepare(
+          `INSERT INTO position_overrides
+             (account_id, instrument_id, quantity_units, cost_units, as_of_date, notes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(account_id, instrument_id) DO UPDATE SET
+             quantity_units = excluded.quantity_units,
+             cost_units = excluded.cost_units,
+             as_of_date = excluded.as_of_date,
+             notes = excluded.notes,
+             updated_at = CURRENT_TIMESTAMP`,
+        )
+        .bind(
+          accountId,
+          instrumentId,
+          quantityUnits,
+          costUnits,
+          asOfDate,
+          notes,
+        )
+        .run();
+    } else if (action === "deletePositionOverride") {
+      const overrideId = positiveIntegerId(body.id, "持仓校准");
+      const deleted = await d1
+        .prepare("DELETE FROM position_overrides WHERE id = ?")
+        .bind(overrideId)
+        .run();
+      if (!Number(deleted.meta.changes ?? 0)) throw new Error("持仓校准不存在");
     } else if (action === "createAccount") {
       const name = String(body.name ?? "").trim();
       if (!name) throw new Error("账户名称不能为空");
@@ -1613,7 +1672,7 @@ export async function POST(request: Request) {
       const accountId = Number(body.id);
       if (!Number.isInteger(accountId) || accountId <= 0)
         throw new Error("账户不存在");
-      const [entryUsage, planUsage] = await Promise.all([
+      const [entryUsage, planUsage, overrideUsage] = await Promise.all([
         d1
           .prepare(
             "SELECT COUNT(*) AS count FROM ledger_entries WHERE account_id = ?",
@@ -1626,12 +1685,19 @@ export async function POST(request: Request) {
           )
           .bind(accountId)
           .first<{ count: number }>(),
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM position_overrides WHERE account_id = ?",
+          )
+          .bind(accountId)
+          .first<{ count: number }>(),
       ]);
       const entryCount = Number(entryUsage?.count ?? 0);
       const planCount = Number(planUsage?.count ?? 0);
-      if (entryCount || planCount)
+      const overrideCount = Number(overrideUsage?.count ?? 0);
+      if (entryCount || planCount || overrideCount)
         throw new Error(
-          `为保护历史数据，请先删除该账户的 ${entryCount} 条流水和 ${planCount} 个定投计划`,
+          `为保护历史数据，请先删除该账户的 ${entryCount} 条流水、${planCount} 个定投计划和 ${overrideCount} 条持仓校准`,
         );
       const deleted = await d1
         .prepare("DELETE FROM accounts WHERE id = ?")
@@ -1641,7 +1707,7 @@ export async function POST(request: Request) {
     } else if (action === "deleteAccountInstrument") {
       const accountId = positiveIntegerId(body.accountId, "账户");
       const instrumentId = positiveIntegerId(body.instrumentId, "产品");
-      const [entryUsage, planUsage] = await Promise.all([
+      const [entryUsage, planUsage, overrideUsage] = await Promise.all([
         d1
           .prepare(
             "SELECT COUNT(*) AS count FROM ledger_entries WHERE account_id = ? AND instrument_id = ?",
@@ -1654,10 +1720,17 @@ export async function POST(request: Request) {
           )
           .bind(accountId, instrumentId)
           .first<{ count: number }>(),
+        d1
+          .prepare(
+            "SELECT COUNT(*) AS count FROM position_overrides WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId)
+          .first<{ count: number }>(),
       ]);
       const deletedEntries = Number(entryUsage?.count ?? 0);
       const deletedPlans = Number(planUsage?.count ?? 0);
-      if (!deletedEntries && !deletedPlans)
+      const deletedOverrides = Number(overrideUsage?.count ?? 0);
+      if (!deletedEntries && !deletedPlans && !deletedOverrides)
         throw new Error("该账户中不存在这个产品的流水或定投计划");
 
       await d1.batch([
@@ -1669,6 +1742,11 @@ export async function POST(request: Request) {
         d1
           .prepare(
             "DELETE FROM recurring_plans WHERE account_id = ? AND instrument_id = ?",
+          )
+          .bind(accountId, instrumentId),
+        d1
+          .prepare(
+            "DELETE FROM position_overrides WHERE account_id = ? AND instrument_id = ?",
           )
           .bind(accountId, instrumentId),
         d1
@@ -1687,7 +1765,7 @@ export async function POST(request: Request) {
           )
           .bind(accountId),
       ]);
-      mutationResult = { deletedEntries, deletedPlans };
+      mutationResult = { deletedEntries, deletedPlans, deletedOverrides };
     } else if (action === "createInstrument") {
       const name = String(body.name ?? "").trim();
       const code = String(body.code ?? "")
@@ -1793,7 +1871,7 @@ export async function POST(request: Request) {
       await upsertManualFundPurchaseLimit(d1, instrumentId, body);
     } else if (action === "deleteInstrument") {
       const instrumentId = positiveIntegerId(body.id, "产品");
-      const [ledgerUsage, planUsage, journalUsage, paperUsage] =
+      const [ledgerUsage, planUsage, journalUsage, paperUsage, overrideUsage] =
         await Promise.all([
           d1
             .prepare(
@@ -1819,12 +1897,19 @@ export async function POST(request: Request) {
             )
             .bind(instrumentId)
             .first<{ count: number }>(),
+          d1
+            .prepare(
+              "SELECT COUNT(*) AS count FROM position_overrides WHERE instrument_id = ?",
+            )
+            .bind(instrumentId)
+            .first<{ count: number }>(),
         ]);
       const references = {
         流水: Number(ledgerUsage?.count ?? 0),
         定投: Number(planUsage?.count ?? 0),
         复盘: Number(journalUsage?.count ?? 0),
         模拟交易: Number(paperUsage?.count ?? 0),
+        持仓校准: Number(overrideUsage?.count ?? 0),
       };
       const usedBy = Object.entries(references)
         .filter(([, count]) => count > 0)

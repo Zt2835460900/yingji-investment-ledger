@@ -83,6 +83,18 @@ export interface TargetRow {
   alert_bps: number;
 }
 
+export interface PositionOverrideRow {
+  id: number;
+  account_id: number;
+  instrument_id: number;
+  quantity_units: number;
+  cost_units: number;
+  as_of_date: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface JournalRow {
   id: number;
   account_id: number | null;

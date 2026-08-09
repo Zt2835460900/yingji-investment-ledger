@@ -5,6 +5,7 @@ import type {
   InstrumentRow,
   LedgerRow,
   PlanRow,
+  PositionOverrideRow,
   PriceRow,
   TargetRow,
 } from "./types";
@@ -94,6 +95,7 @@ export function calculatePortfolio(
   prices: PriceRow[],
   plans: PlanRow[],
   targets: TargetRow[],
+  positionOverrides: PositionOverrideRow[] = [],
 ) {
   const today = shanghaiDate();
   const instrumentById = new Map(instruments.map((item) => [item.id, item]));
@@ -104,13 +106,24 @@ export function calculatePortfolio(
   const orderedPrices = [...prices].sort((a, b) =>
     a.price_date.localeCompare(b.price_date),
   );
-  const firstDate = orderedLedger[0]?.trade_date ?? today;
+  const orderedOverrides = [...positionOverrides].sort(
+    (a, b) => a.as_of_date.localeCompare(b.as_of_date) || a.id - b.id,
+  );
+  const firstDate =
+    [orderedLedger[0]?.trade_date, orderedOverrides[0]?.as_of_date]
+      .filter((value): value is string => Boolean(value))
+      .sort()[0] ?? today;
 
   const cashByAccount = new Map<number, number>();
   // Investor-perspective cash flow: contributions are negative, withdrawals
   // are positive. Keeping it per ledger row lets TWR, XIRR and the account
   // summaries share exactly the same cash-flow convention.
   const investorCashFlowByEntry = new Map<number, number>();
+  const calibrationCashFlows: Array<{
+    accountId: number;
+    date: string;
+    value: number;
+  }> = [];
   const contributionByAccount = new Map<number, number>();
   const positions = new Map<
     string,
@@ -121,6 +134,11 @@ export function calculatePortfolio(
       cost: number;
       realized: number;
       income: number;
+      calibrationId: number | null;
+      calibrationDate: string | null;
+      calibrationNotes: string;
+      ledgerQuantityAtCalibration: number | null;
+      ledgerCostAtCalibration: number | null;
     }
   >();
   let deposits = 0;
@@ -128,6 +146,7 @@ export function calculatePortfolio(
   let realized = 0;
   let income = 0;
   let fees = 0;
+  let calibrationAdjustment = 0;
 
   const recordInvestorCashFlow = (entry: LedgerRow, value: number) => {
     investorCashFlowByEntry.set(entry.id, value);
@@ -150,6 +169,11 @@ export function calculatePortfolio(
       cost: 0,
       realized: 0,
       income: 0,
+      calibrationId: null,
+      calibrationDate: null,
+      calibrationNotes: "",
+      ledgerQuantityAtCalibration: null,
+      ledgerCostAtCalibration: null,
     };
     if (entry.kind === "DEPOSIT") {
       deposits += gross;
@@ -200,7 +224,67 @@ export function calculatePortfolio(
       recordInvestorCashFlow(entry, -cashTopUp);
     }
   };
-  orderedLedger.forEach(applyEntry);
+
+  const applyPositionOverride = (override: PositionOverrideRow) => {
+    const key = `${override.account_id}:${override.instrument_id}`;
+    const position = positions.get(key) ?? {
+      accountId: override.account_id,
+      instrumentId: override.instrument_id,
+      quantity: 0,
+      cost: 0,
+      realized: 0,
+      income: 0,
+      calibrationId: null,
+      calibrationDate: null,
+      calibrationNotes: "",
+      ledgerQuantityAtCalibration: null,
+      ledgerCostAtCalibration: null,
+    };
+    const calibratedQuantity = override.quantity_units / QUANTITY_SCALE;
+    const calibratedCost = override.cost_units / MONEY_SCALE;
+    const costDelta = calibratedCost - position.cost;
+    calibrationAdjustment += costDelta;
+    contributionByAccount.set(
+      override.account_id,
+      (contributionByAccount.get(override.account_id) ?? 0) + costDelta,
+    );
+    if (Math.abs(costDelta) > 1e-12) {
+      calibrationCashFlows.push({
+        accountId: override.account_id,
+        date: override.as_of_date,
+        value: -costDelta,
+      });
+    }
+    position.ledgerQuantityAtCalibration = position.quantity;
+    position.ledgerCostAtCalibration = position.cost;
+    position.quantity = calibratedQuantity;
+    position.cost = calibratedCost;
+    position.calibrationId = override.id;
+    position.calibrationDate = override.as_of_date;
+    position.calibrationNotes = override.notes;
+    positions.set(key, position);
+  };
+
+  const entriesByEventDate = new Map<string, LedgerRow[]>();
+  for (const entry of orderedLedger)
+    entriesByEventDate.set(entry.trade_date, [
+      ...(entriesByEventDate.get(entry.trade_date) ?? []),
+      entry,
+    ]);
+  const overridesByEventDate = new Map<string, PositionOverrideRow[]>();
+  for (const override of orderedOverrides)
+    overridesByEventDate.set(override.as_of_date, [
+      ...(overridesByEventDate.get(override.as_of_date) ?? []),
+      override,
+    ]);
+  const eventDates = [
+    ...new Set([...entriesByEventDate.keys(), ...overridesByEventDate.keys()]),
+  ].sort();
+  for (const date of eventDates) {
+    for (const entry of entriesByEventDate.get(date) ?? []) applyEntry(entry);
+    for (const override of overridesByEventDate.get(date) ?? [])
+      applyPositionOverride(override);
+  }
 
   const latestPrice = new Map<number, PriceRow>();
   for (const price of orderedPrices)
@@ -275,6 +359,7 @@ export function calculatePortfolio(
     ]);
   const simCash = new Map<number, number>();
   const simQty = new Map<string, number>();
+  const simCost = new Map<string, number>();
   const simPrices = new Map<number, number>();
   const series: Array<{
     date: string;
@@ -314,12 +399,21 @@ export function calculatePortfolio(
         simCash.set(entry.account_id, currentCash - gross);
       } else if (entry.kind === "BUY") {
         simQty.set(key, (simQty.get(key) ?? 0) + quantity);
+        simCost.set(key, (simCost.get(key) ?? 0) + gross + fee);
         simCash.set(
           entry.account_id,
           currentCash + portfolioExternalFlow - gross - fee,
         );
       } else if (entry.kind === "SELL") {
-        simQty.set(key, Math.max(0, (simQty.get(key) ?? 0) - quantity));
+        const currentQuantity = simQty.get(key) ?? 0;
+        const matchedQuantity = Math.min(quantity, currentQuantity);
+        const currentCost = simCost.get(key) ?? 0;
+        const matchedCost =
+          currentQuantity > 0
+            ? currentCost * (matchedQuantity / currentQuantity)
+            : 0;
+        simQty.set(key, Math.max(0, currentQuantity - matchedQuantity));
+        simCost.set(key, Math.max(0, currentCost - matchedCost));
         simCash.set(entry.account_id, currentCash + gross - fee);
       } else if (entry.kind === "DIVIDEND") {
         simCash.set(entry.account_id, currentCash + gross - fee);
@@ -329,6 +423,23 @@ export function calculatePortfolio(
           currentCash + portfolioExternalFlow - gross,
         );
       }
+    }
+    for (const override of overridesByEventDate.get(date) ?? []) {
+      const key = `${override.account_id}:${override.instrument_id}`;
+      const currentQuantity = simQty.get(key) ?? 0;
+      const currentCost = simCost.get(key) ?? 0;
+      const calibratedQuantity = override.quantity_units / QUANTITY_SCALE;
+      const calibratedCost = override.cost_units / MONEY_SCALE;
+      const quantityDelta = calibratedQuantity - currentQuantity;
+      const costDelta = calibratedCost - currentCost;
+      // A share-count correction is accounting data, not market performance.
+      // Neutralize its valuation-day asset jump in TWR while book profit still
+      // changes by market-value delta minus the authoritative cost delta.
+      externalFlow +=
+        quantityDelta * (simPrices.get(override.instrument_id) ?? 0);
+      cumulativeContributions += costDelta;
+      simQty.set(key, calibratedQuantity);
+      simCost.set(key, calibratedCost);
     }
     const simulatedCash = [...simCash.values()].reduce(
       (sum, value) => sum + value,
@@ -407,6 +518,12 @@ export function calculatePortfolio(
       value: investorCashFlowByEntry.get(entry.id) ?? 0,
     }))
     .filter((entry) => entry.value !== 0);
+  cashFlows.push(
+    ...calibrationCashFlows.map((flow) => ({
+      date: flow.date,
+      value: flow.value,
+    })),
+  );
   cashFlows.push({ date: today, value: totalAssets });
   const personalXirr = calculateXirr(
     cashFlows.sort((a, b) => a.date.localeCompare(b.date)),
@@ -430,6 +547,11 @@ export function calculatePortfolio(
         value: investorCashFlowByEntry.get(entry.id) ?? 0,
       }))
       .filter((entry) => entry.value !== 0);
+    accountCashFlows.push(
+      ...calibrationCashFlows
+        .filter((flow) => flow.accountId === account.id)
+        .map((flow) => ({ date: flow.date, value: flow.value })),
+    );
     return {
       ...account,
       assets: accountAssets,
@@ -535,14 +657,22 @@ export function calculatePortfolio(
   ).length;
   const valuationDate = holdingPriceDates.at(0) ?? null;
   const latestValuationDate = holdingPriceDates.at(-1) ?? null;
-  const latestValuationIndex = latestValuationDate
-    ? series.findIndex((item) => item.date === latestValuationDate)
-    : -1;
-  const latestValuationProfit =
-    latestValuationIndex > 0
-      ? series[latestValuationIndex]!.profit -
-        series[latestValuationIndex - 1]!.profit
-      : 0;
+  const latestValuationProfit = latestValuationDate
+    ? holdings.reduce((sum, holding) => {
+        if (holding.priceDate !== latestValuationDate) return sum;
+        const previousPrice = (
+          pricesByInstrument.get(holding.instrumentId) ?? []
+        )
+          .filter((price) => price.price_date < latestValuationDate)
+          .at(-1);
+        if (!previousPrice) return sum;
+        return (
+          sum +
+          holding.quantity *
+            (holding.price - previousPrice.price_units / PRICE_SCALE)
+        );
+      }, 0)
+    : 0;
 
   return {
     metrics: {
@@ -560,6 +690,7 @@ export function calculatePortfolio(
       unrealized,
       income,
       fees,
+      calibrationAdjustment,
       twr: series.at(-1)?.twr ?? 0,
       xirr: personalXirr,
       todayProfit: latestValuationProfit,
@@ -587,6 +718,7 @@ export function calculatePortfolio(
       amount: plan.amount_units / MONEY_SCALE,
     })),
     targets,
+    positionOverrides: orderedOverrides,
     series: series.filter(
       (_, index) =>
         index % Math.max(1, Math.floor(series.length / 180)) === 0 ||

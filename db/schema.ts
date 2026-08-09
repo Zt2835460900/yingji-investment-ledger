@@ -133,6 +133,32 @@ export const allocationTargets = sqliteTable(
   (table) => [uniqueIndex("allocation_instrument_idx").on(table.instrumentId)],
 );
 
+export const positionOverrides = sqliteTable(
+  "position_overrides",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    accountId: integer("account_id").notNull(),
+    instrumentId: integer("instrument_id").notNull(),
+    quantityUnits: integer("quantity_units").notNull(),
+    costUnits: integer("cost_units").notNull(),
+    asOfDate: text("as_of_date").notNull(),
+    notes: text("notes").notNull().default(""),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("position_overrides_account_instrument_idx").on(
+      table.accountId,
+      table.instrumentId,
+    ),
+    index("position_overrides_date_idx").on(table.asOfDate),
+  ],
+);
+
 export const investmentJournal = sqliteTable(
   "investment_journal",
   {
