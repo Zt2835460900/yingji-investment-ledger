@@ -49,6 +49,7 @@ export interface FundIndexCalibration {
 }
 
 const EASTMONEY_QUOTE_ORIGIN = "https://push2.eastmoney.com";
+const EASTMONEY_DELAY_QUOTE_ORIGIN = "https://push2delay.eastmoney.com";
 const EASTMONEY_HISTORY_ORIGIN = "https://33.push2his.eastmoney.com";
 
 export const TRACKED_INDICES: TrackedIndexDefinition[] = [
@@ -110,10 +111,13 @@ export function resolveTrackedIndex(fundName: unknown) {
   return TRACKED_INDICES.find((index) => index.pattern.test(name)) ?? null;
 }
 
-export function buildIndexQuoteUrl(indexKey: TrackedIndexKey) {
+export function buildIndexQuoteUrl(
+  indexKey: TrackedIndexKey,
+  origin = EASTMONEY_QUOTE_ORIGIN,
+) {
   const definition = TRACKED_INDICES.find((index) => index.key === indexKey);
   if (!definition) throw new Error("暂不支持该跟踪指数");
-  const url = new URL("/api/qt/stock/get", EASTMONEY_QUOTE_ORIGIN);
+  const url = new URL("/api/qt/stock/get", origin);
   url.searchParams.set("secid", definition.secid);
   url.searchParams.set("fields", "f43,f57,f58,f59,f60,f86,f170");
   return url.toString();
@@ -194,16 +198,28 @@ export function parseIndexQuotePayload(
 }
 
 export async function fetchIndexQuote(indexKey: TrackedIndexKey) {
-  const response = await fetch(buildIndexQuoteUrl(indexKey), {
-    headers: {
-      "User-Agent": "Yingji/1.0 personal-ledger",
-      Referer: "https://quote.eastmoney.com/",
-    },
-    signal: AbortSignal.timeout(6_000),
-  });
-  if (!response.ok)
-    throw new Error(`指数行情暂不可用：HTTP ${response.status}`);
-  return parseIndexQuotePayload(await response.json(), indexKey);
+  let lastError: unknown = null;
+  for (const origin of [EASTMONEY_QUOTE_ORIGIN, EASTMONEY_DELAY_QUOTE_ORIGIN]) {
+    try {
+      const response = await fetch(buildIndexQuoteUrl(indexKey, origin), {
+        headers: {
+          "User-Agent": "Yingji/1.0 personal-ledger",
+          Referer: "https://quote.eastmoney.com/",
+        },
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        continue;
+      }
+      return parseIndexQuotePayload(await response.json(), indexKey);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `指数行情暂不可用${lastError instanceof Error ? `：${lastError.message}` : ""}`,
+  );
 }
 
 export function parseIndexHistoryPayload(
