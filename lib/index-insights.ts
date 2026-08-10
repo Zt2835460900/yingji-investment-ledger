@@ -65,6 +65,16 @@ const EASTMONEY_HISTORY_ORIGINS = [
   "https://74.push2his.eastmoney.com",
 ] as const;
 const EASTMONEY_FUND_API_ORIGIN = "https://api.fund.eastmoney.com";
+const YAHOO_CHART_ORIGIN = "https://query1.finance.yahoo.com";
+const YAHOO_INDEX_SYMBOLS: Record<TrackedIndexKey, string> = {
+  NASDAQ_100: "^NDX",
+  SP_500: "^GSPC",
+  CSI_300: "000300.SS",
+  CSI_500: "000905.SS",
+  SSE_50: "000016.SS",
+  CHINEXT: "399006.SZ",
+  STAR_50: "000688.SS",
+};
 
 export const TRACKED_INDICES: TrackedIndexDefinition[] = [
   {
@@ -154,6 +164,19 @@ export function buildIndexHistoryUrl(
     "fields2",
     "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
   );
+  return url.toString();
+}
+
+export function buildYahooIndexHistoryUrl(indexKey: TrackedIndexKey) {
+  const symbol = YAHOO_INDEX_SYMBOLS[indexKey];
+  if (!symbol) throw new Error("暂不支持该跟踪指数");
+  const url = new URL(
+    `/v8/finance/chart/${encodeURIComponent(symbol)}`,
+    YAHOO_CHART_ORIGIN,
+  );
+  url.searchParams.set("range", "1y");
+  url.searchParams.set("interval", "1d");
+  url.searchParams.set("events", "history");
   return url.toString();
 }
 
@@ -260,22 +283,72 @@ export function parseIndexHistoryPayload(
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+export function parseYahooIndexHistoryPayload(
+  payload: unknown,
+): IndexHistoryPoint[] {
+  const result = (
+    payload as {
+      chart?: {
+        result?: Array<{
+          timestamp?: unknown[] | null;
+          indicators?: {
+            quote?: Array<{ close?: unknown[] | null }> | null;
+          } | null;
+        }> | null;
+      } | null;
+    } | null
+  )?.chart?.result?.[0];
+  const timestamps = result?.timestamp;
+  const closes = result?.indicators?.quote?.[0]?.close;
+  if (!Array.isArray(timestamps) || !Array.isArray(closes)) return [];
+
+  const prices = timestamps
+    .map((timestamp, index) => ({
+      date: new Date(Number(timestamp) * 1_000).toISOString().slice(0, 10),
+      close: Number(closes[index]),
+    }))
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.close) &&
+        point.close > 0,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  return prices.slice(1).map((point, index) => ({
+    date: point.date,
+    changePercent: ((point.close / prices[index].close) - 1) * 100,
+  }));
+}
+
 export async function fetchIndexHistory(indexKey: TrackedIndexKey) {
   try {
     return await Promise.any(
-      EASTMONEY_HISTORY_ORIGINS.map(async (origin) => {
-        const response = await fetch(buildIndexHistoryUrl(indexKey, origin), {
-          headers: {
-            "User-Agent": "Yingji/1.0 personal-ledger",
-            Referer: "https://quote.eastmoney.com/",
-          },
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const points = parseIndexHistoryPayload(await response.json());
-        if (points.length < 20) throw new Error("指数历史行情不足");
-        return points;
-      }),
+      [
+        ...EASTMONEY_HISTORY_ORIGINS.map(async (origin) => {
+          const response = await fetch(buildIndexHistoryUrl(indexKey, origin), {
+            headers: {
+              "User-Agent": "Yingji/1.0 personal-ledger",
+              Referer: "https://quote.eastmoney.com/",
+            },
+            signal: AbortSignal.timeout(8_000),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const points = parseIndexHistoryPayload(await response.json());
+          if (points.length < 20) throw new Error("指数历史行情不足");
+          return points;
+        }),
+        (async () => {
+          const response = await fetch(buildYahooIndexHistoryUrl(indexKey), {
+            headers: { "User-Agent": "Mozilla/5.0 Yingji/1.0" },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const points = parseYahooIndexHistoryPayload(await response.json());
+          if (points.length < 20) throw new Error("指数历史行情不足");
+          return points;
+        })(),
+      ],
     );
   } catch {
     throw new Error("指数历史行情暂不可用");

@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   applyFundIndexCalibration,
   buildIndexQuoteUrl,
+  buildYahooIndexHistoryUrl,
   calibrateFundToIndex,
   calculateIndexMoveEstimate,
   parseIndexHistoryPayload,
+  parseYahooIndexHistoryPayload,
   parseFundDailyReturnPayload,
   lastValidFundCalibration,
   parseIndexQuotePayload,
@@ -80,6 +82,27 @@ test("parses daily index history returns for calibration", () => {
     { date: "2026-08-06", changePercent: -0.06 },
     { date: "2026-08-07", changePercent: 1.3 },
   ]);
+});
+
+test("uses and parses the independent daily-index history fallback", () => {
+  const url = new URL(buildYahooIndexHistoryUrl("NASDAQ_100"));
+  assert.equal(url.origin, "https://query1.finance.yahoo.com");
+  assert.equal(decodeURIComponent(url.pathname).endsWith("/^NDX"), true);
+  assert.equal(url.searchParams.get("interval"), "1d");
+
+  const points = parseYahooIndexHistoryPayload({
+    chart: {
+      result: [
+        {
+          timestamp: [1785943800, 1786030200, 1786116600],
+          indicators: { quote: [{ close: [100, 102, 101] }] },
+        },
+      ],
+    },
+  });
+  assert.equal(points.length, 2);
+  assert.ok(Math.abs(points[0].changePercent - 2) < 1e-12);
+  assert.ok(Math.abs(points[1].changePercent + 0.9803921568627416) < 1e-12);
 });
 
 test("parses published fund NAV returns used for automatic correction", () => {
