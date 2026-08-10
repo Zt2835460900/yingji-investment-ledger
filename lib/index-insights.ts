@@ -47,11 +47,23 @@ export interface FundIndexCalibration {
   sampleSize: number;
   rSquared: number;
   alignment: "SAME_DATE" | "PREVIOUS_SESSION";
+  feedbackBiasPercent: number;
+  validationSampleSize: number;
+  meanAbsoluteErrorPercent: number;
+  latestBacktestDate: string;
+  latestBacktestPredictionPercent: number | null;
+  latestBacktestActualPercent: number | null;
+  latestBacktestErrorPercent: number | null;
 }
 
 const EASTMONEY_QUOTE_ORIGIN = "https://push2.eastmoney.com";
 const EASTMONEY_DELAY_QUOTE_ORIGIN = "https://push2delay.eastmoney.com";
 const EASTMONEY_HISTORY_ORIGIN = "https://33.push2his.eastmoney.com";
+const EASTMONEY_HISTORY_ORIGINS = [
+  EASTMONEY_HISTORY_ORIGIN,
+  "https://push2his.eastmoney.com",
+  "https://74.push2his.eastmoney.com",
+] as const;
 const EASTMONEY_FUND_API_ORIGIN = "https://api.fund.eastmoney.com";
 
 export const TRACKED_INDICES: TrackedIndexDefinition[] = [
@@ -125,10 +137,13 @@ export function buildIndexQuoteUrl(
   return url.toString();
 }
 
-export function buildIndexHistoryUrl(indexKey: TrackedIndexKey) {
+export function buildIndexHistoryUrl(
+  indexKey: TrackedIndexKey,
+  origin = EASTMONEY_HISTORY_ORIGIN,
+) {
   const definition = TRACKED_INDICES.find((index) => index.key === indexKey);
   if (!definition) throw new Error("暂不支持该跟踪指数");
-  const url = new URL("/api/qt/stock/kline/get", EASTMONEY_HISTORY_ORIGIN);
+  const url = new URL("/api/qt/stock/kline/get", origin);
   url.searchParams.set("secid", definition.secid);
   url.searchParams.set("klt", "101");
   url.searchParams.set("fqt", "0");
@@ -246,18 +261,25 @@ export function parseIndexHistoryPayload(
 }
 
 export async function fetchIndexHistory(indexKey: TrackedIndexKey) {
-  const response = await fetch(buildIndexHistoryUrl(indexKey), {
-    headers: {
-      "User-Agent": "Yingji/1.0 personal-ledger",
-      Referer: "https://quote.eastmoney.com/",
-    },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!response.ok)
-    throw new Error(`指数历史行情暂不可用：HTTP ${response.status}`);
-  const points = parseIndexHistoryPayload(await response.json());
-  if (points.length < 20) throw new Error("指数历史行情不足");
-  return points;
+  try {
+    return await Promise.any(
+      EASTMONEY_HISTORY_ORIGINS.map(async (origin) => {
+        const response = await fetch(buildIndexHistoryUrl(indexKey, origin), {
+          headers: {
+            "User-Agent": "Yingji/1.0 personal-ledger",
+            Referer: "https://quote.eastmoney.com/",
+          },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const points = parseIndexHistoryPayload(await response.json());
+        if (points.length < 20) throw new Error("指数历史行情不足");
+        return points;
+      }),
+    );
+  } catch {
+    throw new Error("指数历史行情暂不可用");
+  }
 }
 
 export function parseFundDailyReturnPayload(payload: unknown) {
@@ -318,6 +340,13 @@ const fallbackCalibration = (): FundIndexCalibration => ({
   sampleSize: 0,
   rSquared: 0,
   alignment: "SAME_DATE",
+  feedbackBiasPercent: 0,
+  validationSampleSize: 0,
+  meanAbsoluteErrorPercent: 0,
+  latestBacktestDate: "",
+  latestBacktestPredictionPercent: null,
+  latestBacktestActualPercent: null,
+  latestBacktestErrorPercent: null,
 });
 
 const regression = (pairs: Array<{ x: number; y: number }>) => {
@@ -341,6 +370,72 @@ const regression = (pairs: Array<{ x: number; y: number }>) => {
     // Shrink the average residual to avoid projecting one-off FX/NAV noise.
     alphaPercent: Math.min(0.5, Math.max(-0.5, rawAlpha * 0.25)),
     rSquared: correlation * correlation,
+  };
+};
+
+const rollingForecastFeedback = (
+  pairs: Array<{ date: string; x: number; y: number }>,
+) => {
+  const validations: Array<{
+    date: string;
+    prediction: number;
+    actual: number;
+    error: number;
+  }> = [];
+  const start = Math.max(20, pairs.length - 24);
+  for (let index = start; index < pairs.length; index += 1) {
+    const fitted = regression(pairs.slice(0, index));
+    if (!fitted || fitted.rSquared < 0.05) continue;
+    const point = pairs[index];
+    const prediction =
+      fitted.alphaPercent + fitted.beta * point.x;
+    validations.push({
+      date: point.date,
+      prediction,
+      actual: point.y,
+      error: point.y - prediction,
+    });
+  }
+  if (!validations.length)
+    return {
+      feedbackBiasPercent: 0,
+      validationSampleSize: 0,
+      meanAbsoluteErrorPercent: 0,
+      latestBacktestDate: "",
+      latestBacktestPredictionPercent: null,
+      latestBacktestActualPercent: null,
+      latestBacktestErrorPercent: null,
+    };
+  const meanAbsoluteErrorPercent =
+    validations.reduce((sum, item) => sum + Math.abs(item.error), 0) /
+    validations.length;
+  let weightedError = 0;
+  let totalWeight = 0;
+  validations.forEach((item, index) => {
+    const age = validations.length - index - 1;
+    const weight = Math.pow(0.84, age);
+    const robustError = Math.min(1.5, Math.max(-1.5, item.error));
+    weightedError += robustError * weight;
+    totalWeight += weight;
+  });
+  const reliability = Math.min(0.8, validations.length / 24);
+  const correctionLimit = Math.min(
+    0.5,
+    Math.max(0.05, meanAbsoluteErrorPercent * 1.25),
+  );
+  const feedbackBiasPercent = Math.min(
+    correctionLimit,
+    Math.max(-correctionLimit, (weightedError / totalWeight) * reliability),
+  );
+  const latest = validations.at(-1)!;
+  return {
+    feedbackBiasPercent,
+    validationSampleSize: validations.length,
+    meanAbsoluteErrorPercent,
+    latestBacktestDate: latest.date,
+    latestBacktestPredictionPercent: latest.prediction,
+    latestBacktestActualPercent: latest.actual,
+    latestBacktestErrorPercent: latest.error,
   };
 };
 
@@ -377,7 +472,7 @@ export function calibrateFundToIndex(
           : previousIndexByFundDate.get(point.date);
       const y = Number(point.dailyReturnPercent);
       return x !== undefined && Number.isFinite(x) && Math.abs(x) <= 10
-        ? [{ x, y }]
+        ? [{ date: point.date, x, y }]
         : [];
     });
   const candidates = (["SAME_DATE", "PREVIOUS_SESSION"] as const)
@@ -390,6 +485,7 @@ export function calibrateFundToIndex(
     .sort((a, b) => b.rSquared - a.rSquared);
   const best = candidates[0];
   if (!best || best.rSquared < 0.08) return fallbackCalibration();
+  const feedback = rollingForecastFeedback(best.pairs);
   return {
     calibrated: true,
     source: "LIVE_HISTORY",
@@ -398,6 +494,7 @@ export function calibrateFundToIndex(
     sampleSize: best.pairs.length,
     rSquared: best.rSquared,
     alignment: best.alignment,
+    ...feedback,
   };
 }
 
@@ -413,6 +510,13 @@ const LAST_VALID_FUND_CALIBRATIONS: Record<
     sampleSize: 117,
     rSquared: 0.915457877724748,
     alignment: "SAME_DATE",
+    feedbackBiasPercent: 0,
+    validationSampleSize: 0,
+    meanAbsoluteErrorPercent: 0,
+    latestBacktestDate: "",
+    latestBacktestPredictionPercent: null,
+    latestBacktestActualPercent: null,
+    latestBacktestErrorPercent: null,
   },
   "017641": {
     calibrated: true,
@@ -422,6 +526,13 @@ const LAST_VALID_FUND_CALIBRATIONS: Record<
     sampleSize: 117,
     rSquared: 0.9853357972159883,
     alignment: "SAME_DATE",
+    feedbackBiasPercent: 0,
+    validationSampleSize: 0,
+    meanAbsoluteErrorPercent: 0,
+    latestBacktestDate: "",
+    latestBacktestPredictionPercent: null,
+    latestBacktestActualPercent: null,
+    latestBacktestErrorPercent: null,
   },
 };
 
@@ -436,7 +547,9 @@ export function applyFundIndexCalibration(
 ) {
   if (!Number.isFinite(indexChangePercent)) return 0;
   const adjusted =
-    calibration.alphaPercent + calibration.beta * indexChangePercent;
+    calibration.alphaPercent +
+    calibration.beta * indexChangePercent +
+    calibration.feedbackBiasPercent;
   return Math.min(10, Math.max(-10, adjusted));
 }
 

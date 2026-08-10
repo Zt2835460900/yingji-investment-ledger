@@ -1296,7 +1296,7 @@ function CompanyEarningsTracker({
           </span>
           <h2>跟踪指数涨幅预估与主要公司财报</h2>
           <p>
-            涨幅按基金跟踪指数计算并用真实净值自动校准；底层公司只用于财报提醒。
+            每次真实净值公布后自动回看上次估算误差，并反馈修正下一次估算；底层公司只用于财报提醒。
           </p>
         </div>
         <div className="company-tracker-head-actions">
@@ -1330,7 +1330,7 @@ function CompanyEarningsTracker({
             <TrendingUp size={16} /> 指数校准后估算涨跌
           </span>
           <strong>{signedPercent(estimate.estimatedRate * 100)}</strong>
-          <small>指数涨跌经真实基金净值回归修正</small>
+          <small>指数回归＋真实净值滚动误差反馈</small>
         </div>
         <div className={estimate.estimatedProfit >= 0 ? "up" : "down"}>
           <span>估算当日盈亏</span>
@@ -1399,7 +1399,7 @@ function CompanyEarningsTracker({
                 </strong>
                 <small>
                   {item.calibration.calibrated
-                    ? `${item.calibration.source === "LAST_VALID_HISTORY" ? "最近有效校准 · " : "自动更新 · "}β ${item.calibration.beta.toFixed(2)} · R² ${item.calibration.rSquared.toFixed(2)} · ${item.calibration.sampleSize} 个真实净值样本`
+                    ? `${item.calibration.source === "LAST_VALID_HISTORY" ? "最近有效校准 · " : "自动更新 · "}β ${item.calibration.beta.toFixed(2)} · 反馈 ${signedPercent(item.calibration.feedbackBiasPercent)} · 近${item.calibration.validationSampleSize}次平均误差 ${item.calibration.meanAbsoluteErrorPercent.toFixed(2)}%`
                     : "真实净值样本不足，暂用指数原始涨跌"}
                 </small>
               </div>
@@ -1410,7 +1410,12 @@ function CompanyEarningsTracker({
                     ? "待发布"
                     : signedPercent(item.latestActualReturnPercent)}
                 </strong>
-                <small>{item.latestNavDate || item.error || "等待同步"}</small>
+                <small>
+                  {item.calibration.latestBacktestActualPercent !== null &&
+                  item.calibration.latestBacktestPredictionPercent !== null
+                    ? `${item.calibration.latestBacktestDate} · 上次估算 ${signedPercent(item.calibration.latestBacktestPredictionPercent)} · 误差 ${signedPercent(item.calibration.latestBacktestErrorPercent ?? 0)}`
+                    : item.latestNavDate || item.error || "等待同步"}
+                </small>
               </div>
             </article>
           ))}

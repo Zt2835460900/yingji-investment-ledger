@@ -119,6 +119,32 @@ test("automatically learns the fund tracking coefficient and publication lag", (
   );
 });
 
+test("feeds recent real-NAV forecast errors into the next estimate", () => {
+  const changes = [1.1, -0.8, 1.9, -1.4, 0.5, -2.1, 1.6, -0.2];
+  const indexPoints = Array.from({ length: 80 }, (_, index) => ({
+    date: new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10),
+    changePercent: changes[index % changes.length],
+  }));
+  const fundPoints = indexPoints.map((point, index) => ({
+    date: point.date,
+    dailyReturnPercent:
+      point.changePercent * 0.9 + (index >= 60 ? 0.3 : 0),
+  }));
+  const calibration = calibrateFundToIndex(fundPoints, indexPoints);
+
+  assert.equal(calibration.calibrated, true);
+  assert.ok(calibration.feedbackBiasPercent > 0.08);
+  assert.ok(calibration.validationSampleSize >= 20);
+  assert.ok(calibration.meanAbsoluteErrorPercent > 0);
+  assert.equal(calibration.latestBacktestDate, indexPoints.at(-1)?.date);
+  assert.ok((calibration.latestBacktestErrorPercent ?? 0) > 0);
+  const withoutFeedback =
+    calibration.alphaPercent + calibration.beta * 1.3;
+  assert.ok(
+    applyFundIndexCalibration(1.3, calibration) > withoutFeedback,
+  );
+});
+
 test("uses the latest verified real-NAV calibration during provider outages", () => {
   const calibration = lastValidFundCalibration("017641");
   assert.equal(calibration.calibrated, true);

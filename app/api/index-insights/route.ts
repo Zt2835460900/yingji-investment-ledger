@@ -149,7 +149,7 @@ export async function GET(request: Request) {
       },
       {
         headers: {
-          "Cache-Control": "private, max-age=300, stale-while-revalidate=900",
+          "Cache-Control": "no-store, max-age=0",
         },
       },
     );
