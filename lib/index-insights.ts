@@ -51,6 +51,7 @@ export interface FundIndexCalibration {
 const EASTMONEY_QUOTE_ORIGIN = "https://push2.eastmoney.com";
 const EASTMONEY_DELAY_QUOTE_ORIGIN = "https://push2delay.eastmoney.com";
 const EASTMONEY_HISTORY_ORIGIN = "https://33.push2his.eastmoney.com";
+const EASTMONEY_FUND_API_ORIGIN = "https://api.fund.eastmoney.com";
 
 export const TRACKED_INDICES: TrackedIndexDefinition[] = [
   {
@@ -255,6 +256,56 @@ export async function fetchIndexHistory(indexKey: TrackedIndexKey) {
     throw new Error(`指数历史行情暂不可用：HTTP ${response.status}`);
   const points = parseIndexHistoryPayload(await response.json());
   if (points.length < 20) throw new Error("指数历史行情不足");
+  return points;
+}
+
+export function parseFundDailyReturnPayload(payload: unknown) {
+  const rows = (
+    payload as {
+      Data?: {
+        LSJZList?: Array<{
+          FSRQ?: string;
+          DWJZ?: string | number;
+          JZZZL?: string | number;
+        }> | null;
+      } | null;
+    } | null
+  )?.Data?.LSJZList;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => ({
+      date: String(row.FSRQ ?? ""),
+      nav: Number(row.DWJZ),
+      dailyReturnPercent: Number(row.JZZZL),
+    }))
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.nav) &&
+        point.nav > 0 &&
+        Number.isFinite(point.dailyReturnPercent),
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export async function fetchFundDailyReturns(codeInput: string) {
+  const code = codeInput.trim();
+  if (!/^\d{6}$/.test(code)) throw new Error("基金代码格式不正确");
+  const url = new URL("/f10/lsjz", EASTMONEY_FUND_API_ORIGIN);
+  url.searchParams.set("fundCode", code);
+  url.searchParams.set("pageIndex", "1");
+  url.searchParams.set("pageSize", "180");
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Yingji/1.0 personal-ledger",
+      Referer: "https://fundf10.eastmoney.com/",
+    },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok)
+    throw new Error(`基金真实净值暂不可用：HTTP ${response.status}`);
+  const points = parseFundDailyReturnPayload(await response.json());
+  if (points.length < 20) throw new Error("基金真实净值样本不足");
   return points;
 }
 

@@ -6,6 +6,7 @@ import {
   calibrateFundToIndex,
   calculateIndexMoveEstimate,
   parseIndexHistoryPayload,
+  parseFundDailyReturnPayload,
   parseIndexQuotePayload,
   resolveTrackedIndex,
 } from "../lib/index-insights";
@@ -77,6 +78,21 @@ test("parses daily index history returns for calibration", () => {
   assert.deepEqual(points, [
     { date: "2026-08-06", changePercent: -0.06 },
     { date: "2026-08-07", changePercent: 1.3 },
+  ]);
+});
+
+test("parses published fund NAV returns used for automatic correction", () => {
+  const points = parseFundDailyReturnPayload({
+    Data: {
+      LSJZList: [
+        { FSRQ: "2026-08-06", DWJZ: "1.7132", JZZZL: "-0.14" },
+        { FSRQ: "2026-08-05", DWJZ: "1.7156", JZZZL: "-0.20" },
+      ],
+    },
+  });
+  assert.deepEqual(points, [
+    { date: "2026-08-05", nav: 1.7156, dailyReturnPercent: -0.2 },
+    { date: "2026-08-06", nav: 1.7132, dailyReturnPercent: -0.14 },
   ]);
 });
 

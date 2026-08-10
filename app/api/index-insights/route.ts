@@ -1,12 +1,12 @@
 import {
   applyFundIndexCalibration,
   calibrateFundToIndex,
+  fetchFundDailyReturns,
   fetchIndexHistory,
   fetchIndexQuote,
   resolveTrackedIndex,
   type TrackedIndexKey,
 } from "@/lib/index-insights";
-import { fetchFundNavHistory } from "@/lib/fund-data";
 
 export const dynamic = "force-dynamic";
 
@@ -111,14 +111,11 @@ export async function GET(request: Request) {
         let latestActualReturnPercent: number | null = null;
         let calibrationError = "";
         try {
-          const history = await fetchFundNavHistory(fund.fundCode);
-          latestNavDate = history.latestDate;
+          const history = await fetchFundDailyReturns(fund.fundCode);
+          latestNavDate = history.at(-1)?.date ?? "";
           latestActualReturnPercent =
-            history.points.at(-1)?.dailyReturnPercent ?? null;
-          calibration = calibrateFundToIndex(
-            history.points,
-            data?.history ?? [],
-          );
+            history.at(-1)?.dailyReturnPercent ?? null;
+          calibration = calibrateFundToIndex(history, data?.history ?? []);
         } catch (error) {
           calibrationError =
             error instanceof Error ? error.message : "基金真实净值读取失败";
