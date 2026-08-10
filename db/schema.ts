@@ -67,6 +67,7 @@ export const ledgerEntries = sqliteTable(
     instrumentId: integer("instrument_id"),
     kind: text("kind").notNull(),
     tradeDate: text("trade_date").notNull(),
+    orderTime: text("order_time").notNull().default(""),
     confirmationDate: text("confirmation_date").notNull().default(""),
     quantityUnits: integer("quantity_units").notNull().default(0),
     priceUnits: integer("price_units").notNull().default(0),

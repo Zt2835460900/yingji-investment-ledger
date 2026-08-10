@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  parseEastmoneyF10LatestNav,
   parseEastmoneyLatestNav,
   parseEfundsOfficialNav,
   parseFundPurchaseLimit,
+  selectFundNavOnOrAfter,
 } from "../lib/fund-data";
+import { fundOrderNavStartDate } from "../lib/fund-order";
 
 test("parses the latest published NAV from the official E Fund page", () => {
   const html = `
@@ -43,6 +46,36 @@ test("selects the final valid point from the Eastmoney NAV script", () => {
     nav: 1.1501,
   });
   assert.equal(parseEastmoneyLatestNav("var Data_netWorthTrend = [];"), null);
+});
+
+test("parses the newest published NAV from the stable F10 response", () => {
+  assert.deepEqual(
+    parseEastmoneyF10LatestNav({
+      Data: {
+        LSJZList: [
+          { FSRQ: "2026-08-07", DWJZ: "2.3098" },
+          { FSRQ: "2026-08-06", DWJZ: "2.2838" },
+        ],
+      },
+    }),
+    { date: "2026-08-07", nav: 2.3098 },
+  );
+});
+
+test("fund order cutoff chooses the first published NAV on or after its target", () => {
+  assert.equal(fundOrderNavStartDate("2026-08-07", "14:59"), "2026-08-07");
+  assert.equal(fundOrderNavStartDate("2026-08-07", "15:00"), "2026-08-10");
+  assert.equal(fundOrderNavStartDate("2026-08-08", "10:00"), "2026-08-10");
+  assert.deepEqual(
+    selectFundNavOnOrAfter(
+      [
+        { date: "2026-08-07", nav: 1 },
+        { date: "2026-08-11", nav: 1.1 },
+      ],
+      "2026-08-10",
+    ),
+    { date: "2026-08-11", nav: 1.1 },
+  );
 });
 
 test("parses a paused fund and its published daily purchase limit", () => {

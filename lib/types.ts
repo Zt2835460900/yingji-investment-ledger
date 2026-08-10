@@ -43,6 +43,7 @@ export interface LedgerRow {
   instrument_id: number | null;
   kind: EntryKind;
   trade_date: string;
+  order_time?: string;
   confirmation_date: string;
   quantity_units: number;
   price_units: number;

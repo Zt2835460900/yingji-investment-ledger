@@ -50,7 +50,10 @@ export interface FundHistoryPoint extends FundNavPoint {
   totalReturnNav: number;
 }
 
-export type FundNavSource = "OFFICIAL_EFUNDS" | "EASTMONEY";
+export type FundNavSource =
+  | "OFFICIAL_EFUNDS"
+  | "EASTMONEY_F10"
+  | "EASTMONEY";
 
 export interface FundNavQuote extends FundNavPoint {
   code: string;
@@ -83,6 +86,21 @@ export function selectFundNav(
     .sort((a, b) => a.date.localeCompare(b.date));
   if (!requestedDate) return ordered.at(-1) ?? null;
   return ordered.findLast((point) => point.date <= requestedDate) ?? null;
+}
+
+export function selectFundNavOnOrAfter(
+  points: FundNavPoint[],
+  requestedDate: string,
+): FundNavPoint | null {
+  return points
+    .filter(
+      (point) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+        Number.isFinite(point.nav) &&
+        point.nav > 0 &&
+        point.date >= requestedDate,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date))[0] ?? null;
 }
 
 const normalizeNavDate = (value: string) => {
@@ -192,6 +210,27 @@ export function parseEastmoneyLatestNav(script: string): FundNavPoint | null {
   return selectFundNav(parseEastmoneyNavPoints(script));
 }
 
+export function parseEastmoneyF10LatestNav(payload: unknown): FundNavPoint | null {
+  let parsed = payload;
+  if (typeof payload === "string") {
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+  const rows = (
+    parsed as { Data?: { LSJZList?: Array<{ FSRQ?: string; DWJZ?: string }> } }
+  )?.Data?.LSJZList;
+  if (!Array.isArray(rows)) return null;
+  return selectFundNav(
+    rows.map((row) => ({
+      date: String(row.FSRQ ?? ""),
+      nav: Number(row.DWJZ),
+    })),
+  );
+}
+
 const fundRequestHeaders = {
   "User-Agent": "Yingji/1.0 personal-ledger",
 };
@@ -250,6 +289,7 @@ export async function fetchLatestFundNav(
   const code = codeInput.trim();
   if (!/^\d{6}$/.test(code)) throw new Error("基金或 ETF 代码应为 6 位数字");
 
+  const candidates: FundNavQuote[] = [];
   if (/易方达/.test(fundName)) {
     try {
       const html = await fetchText(
@@ -258,36 +298,65 @@ export async function fetchLatestFundNav(
       );
       const point = parseEfundsOfficialNav(html);
       if (point)
-        return {
+        candidates.push({
           code,
           ...point,
           source: "OFFICIAL_EFUNDS",
           isOfficial: true,
           fetchedAt: new Date().toISOString(),
-        };
+        });
     } catch {
       // Fall through to the fast backup source.
     }
   }
 
-  let script = "";
-  try {
-    script = await fetchText(
+  const [f10Result, chartResult] = await Promise.allSettled([
+    fetch(
+      `https://api.fund.eastmoney.com/f10/lsjz?fundCode=${code}&pageIndex=1&pageSize=5`,
+      {
+        headers: {
+          ...fundRequestHeaders,
+          Referer: `https://fundf10.eastmoney.com/jjjz_${code}.html`,
+        },
+        signal: AbortSignal.timeout(6_500),
+      },
+    ).then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    }),
+    fetchText(
       `https://fund.eastmoney.com/pingzhongdata/${code}.js?v=${Date.now()}`,
-      5_500,
-    );
-  } catch {
-    throw new Error("基金净值数据源暂时不可用");
+      6_500,
+    ),
+  ]);
+  if (f10Result.status === "fulfilled") {
+    const point = parseEastmoneyF10LatestNav(f10Result.value);
+    if (point)
+      candidates.push({
+        code,
+        ...point,
+        source: "EASTMONEY_F10",
+        isOfficial: false,
+        fetchedAt: new Date().toISOString(),
+      });
   }
-  const point = parseEastmoneyLatestNav(script);
-  if (!point) throw new Error("未查询到可用的基金净值");
-  return {
-    code,
-    ...point,
-    source: "EASTMONEY",
-    isOfficial: false,
-    fetchedAt: new Date().toISOString(),
-  };
+  if (chartResult.status === "fulfilled") {
+    const point = parseEastmoneyLatestNav(chartResult.value);
+    if (point)
+      candidates.push({
+        code,
+        ...point,
+        source: "EASTMONEY",
+        isOfficial: false,
+        fetchedAt: new Date().toISOString(),
+      });
+  }
+  const latest = candidates.sort(
+    (a, b) =>
+      a.date.localeCompare(b.date) || Number(a.isOfficial) - Number(b.isOfficial),
+  ).at(-1);
+  if (!latest) throw new Error("基金净值数据源暂时不可用");
+  return latest;
 }
 
 const plainText = (value: string) =>
@@ -422,6 +491,7 @@ function parseRedemptionTiers(html: string) {
 export async function fetchLiveFundData(
   codeInput: string,
   quoteDateInput = "",
+  quoteDirection: "ON_OR_BEFORE" | "ON_OR_AFTER" = "ON_OR_BEFORE",
 ): Promise<LiveFundData> {
   const code = codeInput.trim();
   if (!/^\d{6}$/.test(code)) throw new Error("场外基金代码应为 6 位数字");
@@ -467,7 +537,10 @@ export async function fetchLiveFundData(
   let latestNavDate = "";
   const navPoints = parseEastmoneyNavPoints(script);
   const latestPoint = selectFundNav(navPoints);
-  const quotePoint = selectFundNav(navPoints, quoteDate);
+  const quotePoint =
+    quoteDate && quoteDirection === "ON_OR_AFTER"
+      ? selectFundNavOnOrAfter(navPoints, quoteDate)
+      : selectFundNav(navPoints, quoteDate);
   latestNav = latestPoint?.nav ?? 0;
   latestNavDate = latestPoint?.date ?? "";
   const standardRate = Number(valueOf(script, "fund_sourceRate") || 0);

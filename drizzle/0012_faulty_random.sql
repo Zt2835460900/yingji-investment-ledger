@@ -1,0 +1,1 @@
+ALTER TABLE `ledger_entries` ADD `order_time` text DEFAULT '' NOT NULL;

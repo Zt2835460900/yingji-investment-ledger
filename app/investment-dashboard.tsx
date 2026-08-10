@@ -68,6 +68,10 @@ import {
   type AccountInstrumentDeletionCounts,
 } from "@/lib/account-instrument-deletion";
 import { reconcileTradeEntry } from "@/lib/ledger-reconciliation";
+import {
+  fundOrderTimingLabel,
+  normalizeOrderTime,
+} from "@/lib/fund-order";
 import { quantityFromAmount } from "@/lib/money";
 
 type View =
@@ -161,6 +165,7 @@ interface PortfolioData {
     instrument_id: number | null;
     kind: string;
     trade_date: string;
+    order_time: string;
     confirmation_date: string;
     quantity_units: number;
     price_units: number;
@@ -1054,11 +1059,9 @@ function Overview({
   const sourceLabel =
     syncedCount === 0
       ? "等待净值"
-      : officialCount >= syncedCount
-        ? "官方来源"
-        : officialCount > 0
-          ? "官方＋备用来源"
-          : "备用来源";
+      : officialCount > 0
+        ? "基金公司＋公开净值"
+        : "公开净值已同步";
   const syncStatus =
     data.navSync?.status === "running"
       ? "后台同步中"
@@ -1878,7 +1881,7 @@ function Ledger({
 }) {
   const exportLedger = () => {
     const header =
-      "交易日期,确认日期,类型,账户,产品代码,产品名称,份额,价格,金额,手续费,税费,渠道,备注";
+      "交易日期,下单时间,确认日期,类型,账户,产品代码,产品名称,份额,价格,金额,手续费,税费,渠道,备注";
     const lines = rows.map((entry) => {
       const instrument = data.instruments.find(
         (item) => item.id === entry.instrument_id,
@@ -1888,6 +1891,7 @@ function Ledger({
       );
       const cells = [
         entry.trade_date,
+        entry.order_time,
         entry.confirmation_date,
         kindLabels[entry.kind] ?? entry.kind,
         account?.name ?? "",
@@ -2045,6 +2049,7 @@ function Ledger({
                     <td data-label="交易日期">
                       <div className="ledger-cell-stack">
                         <strong>{entry.trade_date}</strong>
+                        {entry.order_time && <small>下单 {entry.order_time}</small>}
                         {entry.confirmation_date && (
                           <small>确认 {entry.confirmation_date}</small>
                         )}
@@ -3263,7 +3268,7 @@ function DataCenter({
   const [exporting, setExporting] = useState(false);
   const downloadTemplate = () => {
     const content =
-      "账户名称,交易类型,交易日期,确认日期,产品代码,成交份额,成交价格,成交金额,手续费,税费,备注,外部流水号\n纳斯达克100ETF,BUY,2026-07-18,2026-07-21,513100,100,2.846,284.6,0.1,0,示例交易,REF-001";
+      "账户名称,交易类型,交易日期,下单时间,确认日期,产品代码,成交份额,成交价格,成交金额,手续费,税费,备注,外部流水号\n纳斯达克100ETF,BUY,2026-07-18,14:30,2026-07-21,513100,100,2.846,284.6,0.1,0,示例交易,REF-001";
     const blob = new Blob(["\ufeff" + content], {
       type: "text/csv;charset=utf-8",
     });
@@ -3778,6 +3783,14 @@ function ModalForm({
   submit: (p: Record<string, unknown>, s?: string) => Promise<boolean>;
 }) {
   const today = new Date().toISOString().slice(0, 10);
+  const currentOrderTime = normalizeOrderTime(
+    new Date().toLocaleTimeString("en-GB", {
+      timeZone: "Asia/Shanghai",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }),
+  );
   const initialEntryInstrument = editingEntry
     ? data.instruments.find((item) => item.id === editingEntry.instrument_id)
     : null;
@@ -3833,6 +3846,7 @@ function ModalForm({
         ? "STOCK"
         : "FUND",
     tradeDate: editingEntry?.trade_date ?? today,
+    orderTime: editingEntry?.order_time ?? (currentOrderTime || "14:30"),
     confirmationDate: editingEntry?.confirmation_date ?? "",
     quantity:
       type === "positionOverride"
@@ -3960,6 +3974,14 @@ function ModalForm({
       ? resolvedInstrument
       : undefined) ??
     data.instruments.find((item) => item.id === Number(form.instrumentId));
+  const isOffExchangeFund = selectedInstrument?.product_type === "FUND";
+  const orderTiming = fundOrderTimingLabel(
+    form.tradeDate,
+    form.orderTime ?? "",
+  );
+  const lookupTradeDate = isOffExchangeFund
+    ? orderTiming.navStartDate
+    : form.tradeDate;
   const selectedPurchaseLimit = selectedInstrument
     ? data.purchaseLimits.find(
         (item) => item.instrument_id === selectedInstrument.id,
@@ -4012,16 +4034,18 @@ function ModalForm({
         setPriceIsAuto(true);
         setLookupBusy(true);
         setLookupNote(
-          `正在匹配${preferredProductType === "STOCK" ? "股票资料和价格" : `基金资料及 ${form.tradeDate} 对应净值`}…`,
+          `正在匹配${preferredProductType === "STOCK" ? "股票资料和价格" : `基金资料及 ${lookupTradeDate} 对应净值`}…`,
         );
         try {
           const response = await fetch("/api/portfolio", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              action: "lookupInstrument",
+              action: isOffExchangeFund
+                ? "lookupFundOrder"
+                : "lookupInstrument",
               code,
-              tradeDate: form.tradeDate,
+              tradeDate: lookupTradeDate,
               preferredProductType,
             }),
             signal: controller.signal,
@@ -4053,7 +4077,7 @@ function ModalForm({
               ? {
                   price: result.quoteNav,
                   date: result.quoteNavDate,
-                  requestedDate: result.quoteDateRequested ?? form.tradeDate,
+                  requestedDate: result.quoteDateRequested ?? lookupTradeDate,
                   isExact: result.quoteIsExact === true,
                   isLive: result.isLive !== false,
                 }
@@ -4088,7 +4112,7 @@ function ModalForm({
               : current,
           );
           setLookupNote(
-            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；净值日期 ${result.quoteNavDate}` : `；${form.tradeDate} 之前暂无公开净值`}${account ? (form.kind === "BUY" ? `；保存买入后将把账户“${account.name}”改为正式产品名称` : `；账户已匹配为 ${account.name}`) : ""}`,
+            `已自动匹配：${result.instrument.name} · ${result.fundCategory || result.instrument.product_type} · ${result.instrument.asset_class}${result.quoteNavDate ? `；适用净值日期 ${result.quoteNavDate}` : `；${lookupTradeDate} 起尚未发布可用净值`}${isOffExchangeFund ? `；${orderTiming.label}` : ""}${account ? (form.kind === "BUY" ? `；保存买入后将把账户“${account.name}”改为正式产品名称` : `；账户已匹配为 ${account.name}`) : ""}`,
           );
         } catch (caught) {
           if (!controller.signal.aborted)
@@ -4112,10 +4136,12 @@ function ModalForm({
     editingEntry,
     form.instrumentCode,
     form.kind,
+    form.orderTime,
     form.preferredProductType,
     form.tradeDate,
     initialEntryInstrument,
     priceIsAuto,
+    selectedInstrument?.product_type,
     type,
   ]);
   useEffect(() => {
@@ -4864,6 +4890,25 @@ function ModalForm({
                     onChange={(e) => set("tradeDate", e.target.value)}
                   />
                 </Field>
+                {["BUY", "SELL"].includes(form.kind) && (
+                  <Field label="下单时间">
+                    <input
+                      required
+                      type="time"
+                      step="60"
+                      value={form.orderTime ?? ""}
+                      onChange={(event) => {
+                        setPriceIsAuto(true);
+                        set("orderTime", event.target.value);
+                      }}
+                    />
+                    <small>
+                      {isOffExchangeFund
+                        ? `${orderTiming.label}；最早适用净值日 ${orderTiming.navStartDate}`
+                        : "ETF或股票按实际成交价格；场外基金按15:00申购截止时间匹配净值"}
+                    </small>
+                  </Field>
+                )}
                 {["BUY", "SELL"].includes(form.kind) &&
                   (!selectedInstrument ||
                     ["FUND", "ETF"].includes(
@@ -5548,6 +5593,7 @@ async function importFile(
       账户名称: "accountName",
       交易类型: "kind",
       交易日期: "tradeDate",
+      下单时间: "orderTime",
       确认日期: "confirmationDate",
       产品代码: "code",
       成交份额: "quantity",

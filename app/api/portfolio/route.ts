@@ -19,6 +19,7 @@ import {
 } from "@/lib/fees";
 import { calculateDailyPlanProgress } from "@/lib/daily-investment-plans";
 import { fetchLatestFundNav, fetchLiveFundData } from "@/lib/fund-data";
+import { normalizeOrderTime } from "@/lib/fund-order";
 import {
   describeUnsupportedStockCode,
   fetchLiveAshareQuote,
@@ -152,7 +153,7 @@ async function upsertSyncedPrice(
          price_units = excluded.price_units,
          source = excluded.source
        WHERE prices.source <> 'MANUAL'
-         AND NOT (prices.source = 'OFFICIAL_EFUNDS' AND excluded.source = 'EASTMONEY')`,
+         AND NOT (prices.source = 'OFFICIAL_EFUNDS' AND excluded.source IN ('EASTMONEY', 'EASTMONEY_F10'))`,
     )
     .bind(instrumentId, priceDate, decimalToUnits(nav, PRICE_SCALE), source)
     .run();
@@ -482,6 +483,7 @@ async function lookupFundInstrument(
   d1: D1Database,
   codeInput: string,
   quoteDateInput = "",
+  quoteDirection: "ON_OR_BEFORE" | "ON_OR_AFTER" = "ON_OR_BEFORE",
 ) {
   const code = normalizeProductCodeInput(codeInput);
   const quoteDate = quoteDateInput.trim();
@@ -510,7 +512,7 @@ async function lookupFundInstrument(
 
   let live: Awaited<ReturnType<typeof fetchLiveFundData>>;
   try {
-    live = await fetchLiveFundData(code, quoteDate);
+    live = await fetchLiveFundData(code, quoteDate, quoteDirection);
   } catch (error) {
     if (stored)
       return {
@@ -950,7 +952,7 @@ async function loadPortfolio() {
       .all<InstrumentRow>(),
     d1
       .prepare(
-        "SELECT id, account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
+        "SELECT id, account_id, instrument_id, kind, trade_date, order_time, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source FROM ledger_entries ORDER BY trade_date, id",
       )
       .all<LedgerRow>(),
     d1
@@ -1047,7 +1049,9 @@ async function loadPortfolio() {
 
 export async function GET() {
   try {
-    return Response.json(await loadPortfolio());
+    return Response.json(await loadPortfolio(), {
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "读取数据失败" },
@@ -1278,6 +1282,16 @@ export async function POST(request: Request) {
       return Response.json(lookedUp);
     }
 
+    if (action === "lookupFundOrder") {
+      const lookedUp = await lookupFundInstrument(
+        d1,
+        String(body.code ?? ""),
+        String(body.tradeDate ?? ""),
+        "ON_OR_AFTER",
+      );
+      return Response.json(lookedUp);
+    }
+
     if (action === "resolveInstrument") {
       const preferredProductType = parsePreferredProductType(
         body.preferredProductType,
@@ -1372,6 +1386,9 @@ export async function POST(request: Request) {
       const quantityUnits = decimalToUnits(body.quantity, QUANTITY_SCALE);
       const priceUnits = decimalToUnits(body.price, PRICE_SCALE);
       const tradeDate = isoDate(body.tradeDate);
+      const orderTime = ["BUY", "SELL"].includes(kind)
+        ? normalizeOrderTime(body.orderTime)
+        : "";
       const confirmationDate =
         ["BUY", "SELL"].includes(kind) &&
         String(body.confirmationDate ?? "").trim()
@@ -1552,6 +1569,7 @@ export async function POST(request: Request) {
         instrumentId,
         kind,
         tradeDate,
+        orderTime,
         confirmationDate,
         quantityUnits,
         priceUnits,
@@ -1568,7 +1586,7 @@ export async function POST(request: Request) {
             .prepare(
               `UPDATE ledger_entries
                SET account_id = ?, instrument_id = ?, kind = ?, trade_date = ?,
-                   confirmation_date = ?, quantity_units = ?, price_units = ?,
+                   order_time = ?, confirmation_date = ?, quantity_units = ?, price_units = ?,
                    gross_amount_units = ?, fee_units = ?, tax_units = ?,
                    notes = ?, external_ref = ?, purchase_channel = ?, fee_source = ?
                WHERE id = ?`,
@@ -1577,8 +1595,8 @@ export async function POST(request: Request) {
         : d1
             .prepare(
               `INSERT INTO ledger_entries
-        (account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (account_id, instrument_id, kind, trade_date, order_time, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref, purchase_channel, fee_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(...entryValues);
       const entryStatements = [entryStatement];
@@ -2264,6 +2282,10 @@ export async function POST(request: Request) {
         const quantityUnits = decimalToUnits(row.quantity, QUANTITY_SCALE);
         const priceUnits = decimalToUnits(row.price, PRICE_SCALE);
         const tradeDate = isoDate(row.tradeDate);
+        const orderTime =
+          kind === "BUY" || kind === "SELL"
+            ? normalizeOrderTime(row.orderTime)
+            : "";
         const confirmationDate =
           (kind === "BUY" || kind === "SELL") &&
           String(row.confirmationDate ?? "").trim()
@@ -2290,14 +2312,15 @@ export async function POST(request: Request) {
         return d1
           .prepare(
             `INSERT INTO ledger_entries
-          (account_id, instrument_id, kind, trade_date, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (account_id, instrument_id, kind, trade_date, order_time, confirmation_date, quantity_units, price_units, gross_amount_units, fee_units, tax_units, notes, external_ref)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             accountId,
             instrumentId,
             kind,
             tradeDate,
+            orderTime,
             confirmationDate,
             quantityUnits,
             priceUnits,
