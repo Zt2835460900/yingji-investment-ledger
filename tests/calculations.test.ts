@@ -380,6 +380,7 @@ function accountingEntry(
     price?: number;
     gross?: number;
     fee?: number;
+    confirmationDate?: string;
   } = {},
 ): LedgerRow {
   const quantity = options.quantity ?? 0;
@@ -392,7 +393,8 @@ function accountingEntry(
       options.instrumentId === undefined ? 1 : options.instrumentId,
     kind,
     trade_date: options.date ?? "2026-07-15",
-    confirmation_date: options.date ?? "2026-07-15",
+    confirmation_date:
+      options.confirmationDate ?? options.date ?? "2026-07-15",
     quantity_units: quantity * QUANTITY_SCALE,
     price_units: price * PRICE_SCALE,
     gross_amount_units: gross * MONEY_SCALE,
@@ -404,6 +406,41 @@ function accountingEntry(
     fee_source: "TEST",
   };
 }
+
+test("pending fund purchases remain assets without creating shares or profit", () => {
+  const confirmed = accountingEntry(1, "BUY", {
+    date: "2026-07-15",
+    quantity: 100,
+    price: 1,
+    gross: 100,
+  });
+  const pending = accountingEntry(2, "BUY", {
+    date: "2026-08-10",
+    confirmationDate: "2099-01-01",
+    quantity: 10,
+    price: 2,
+    gross: 20,
+  });
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [confirmed, pending],
+    [accountingPrice(1, 2, "2026-08-10")],
+    [],
+    [],
+  );
+
+  assert.equal(result.holdings[0].quantity, 100);
+  assert.equal(result.holdings[0].cost, 100);
+  assert.equal(result.holdings[0].unrealized, 100);
+  assert.equal(result.metrics.securitiesValue, 200);
+  assert.equal(result.metrics.pendingSubscriptions, 20);
+  assert.equal(result.metrics.totalAssets, 220);
+  assert.equal(result.metrics.netContributions, 120);
+  assert.equal(result.metrics.totalProfit, 100);
+  assert.equal(result.series.at(-1)?.assets, 220);
+  assert.equal(result.series.at(-1)?.profit, 100);
+});
 
 function accountingPrice(
   id: number,

@@ -103,6 +103,14 @@ export function calculatePortfolio(
   const orderedLedger = [...ledger].sort(
     (a, b) => a.trade_date.localeCompare(b.trade_date) || a.id - b.id,
   );
+  const isPendingTrade = (entry: LedgerRow) =>
+    (entry.kind === "BUY" || entry.kind === "SELL") &&
+    Boolean(entry.confirmation_date) &&
+    entry.confirmation_date > today;
+  const settledLedger = orderedLedger.filter((entry) => !isPendingTrade(entry));
+  const pendingBuyLedger = orderedLedger.filter(
+    (entry) => entry.kind === "BUY" && isPendingTrade(entry),
+  );
   const orderedPrices = [...prices].sort((a, b) =>
     a.price_date.localeCompare(b.price_date),
   );
@@ -130,6 +138,7 @@ export function calculatePortfolio(
       .sort()[0] ?? today;
 
   const cashByAccount = new Map<number, number>();
+  const pendingSubscriptionsByAccount = new Map<number, number>();
   // Investor-perspective cash flow: contributions are negative, withdrawals
   // are positive. Keeping it per ledger row lets TWR, XIRR and the account
   // summaries share exactly the same cash-flow convention.
@@ -281,7 +290,7 @@ export function calculatePortfolio(
   };
 
   const entriesByEventDate = new Map<string, LedgerRow[]>();
-  for (const entry of orderedLedger)
+  for (const entry of settledLedger)
     entriesByEventDate.set(entry.trade_date, [
       ...(entriesByEventDate.get(entry.trade_date) ?? []),
       entry,
@@ -299,6 +308,24 @@ export function calculatePortfolio(
     for (const entry of entriesByEventDate.get(date) ?? []) applyEntry(entry);
     for (const override of overridesByEventDate.get(date) ?? [])
       applyPositionOverride(override);
+  }
+  // A fund order does not own shares and cannot earn NAV profit before its
+  // confirmation date. Keep the submitted principal as a pending asset so
+  // total assets remain complete without inflating quantity or unrealized P&L.
+  for (const entry of pendingBuyLedger) {
+    const cash = cashByAccount.get(entry.account_id) ?? 0;
+    const gross = entry.gross_amount_units / MONEY_SCALE;
+    const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
+    const requiredCash = gross + fee;
+    const cashTopUp = Math.max(0, requiredCash - cash);
+    deposits += cashTopUp;
+    fees += fee;
+    cashByAccount.set(entry.account_id, cash + cashTopUp - requiredCash);
+    pendingSubscriptionsByAccount.set(
+      entry.account_id,
+      (pendingSubscriptionsByAccount.get(entry.account_id) ?? 0) + gross,
+    );
+    recordInvestorCashFlow(entry, -cashTopUp);
   }
 
   const latestPrice = new Map<number, PriceRow>();
@@ -353,7 +380,11 @@ export function calculatePortfolio(
     (sum, value) => sum + value,
     0,
   );
-  const totalAssets = securitiesValue + cash;
+  const pendingSubscriptions = [...pendingSubscriptionsByAccount.values()].reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+  const totalAssets = securitiesValue + cash + pendingSubscriptions;
   const netContributions = [...contributionByAccount.values()].reduce(
     (sum, value) => sum + value,
     0,
@@ -362,12 +393,19 @@ export function calculatePortfolio(
   const unrealized = holdings.reduce((sum, item) => sum + item.unrealized, 0);
 
   const entriesByDate = new Map<string, LedgerRow[]>();
-  for (const entry of orderedLedger)
+  for (const entry of settledLedger)
     entriesByDate.set(entry.trade_date, [
       ...(entriesByDate.get(entry.trade_date) ?? []),
       entry,
     ]);
+  const pendingBuysByDate = new Map<string, LedgerRow[]>();
+  for (const entry of pendingBuyLedger)
+    pendingBuysByDate.set(entry.trade_date, [
+      ...(pendingBuysByDate.get(entry.trade_date) ?? []),
+      entry,
+    ]);
   const simCash = new Map<number, number>();
+  const simPendingSubscriptions = new Map<number, number>();
   const simQty = new Map<string, number>();
   const simCost = new Map<string, number>();
   const simPrices = new Map<number, number>();
@@ -434,6 +472,24 @@ export function calculatePortfolio(
         );
       }
     }
+    for (const entry of pendingBuysByDate.get(date) ?? []) {
+      const gross = entry.gross_amount_units / MONEY_SCALE;
+      const fee = (entry.fee_units + entry.tax_units) / MONEY_SCALE;
+      const currentCash = simCash.get(entry.account_id) ?? 0;
+      const portfolioExternalFlow = -(
+        investorCashFlowByEntry.get(entry.id) ?? 0
+      );
+      externalFlow += portfolioExternalFlow;
+      cumulativeContributions += portfolioExternalFlow;
+      simCash.set(
+        entry.account_id,
+        currentCash + portfolioExternalFlow - gross - fee,
+      );
+      simPendingSubscriptions.set(
+        entry.account_id,
+        (simPendingSubscriptions.get(entry.account_id) ?? 0) + gross,
+      );
+    }
     for (const override of overridesByEventDate.get(date) ?? []) {
       const key = `${override.account_id}:${override.instrument_id}`;
       const currentQuantity = simQty.get(key) ?? 0;
@@ -455,12 +511,16 @@ export function calculatePortfolio(
       (sum, value) => sum + value,
       0,
     );
+    const simulatedPending = [...simPendingSubscriptions.values()].reduce(
+      (sum, value) => sum + value,
+      0,
+    );
     let simulatedSecurities = 0;
     for (const [key, quantity] of simQty.entries()) {
       const instrumentId = Number(key.split(":")[1]);
       simulatedSecurities += quantity * (simPrices.get(instrumentId) ?? 0);
     }
-    const assets = simulatedCash + simulatedSecurities;
+    const assets = simulatedCash + simulatedSecurities + simulatedPending;
     const denominator = priorValue + externalFlow;
     const dailyReturn =
       denominator > 0 ? (assets - priorValue - externalFlow) / denominator : 0;
@@ -556,7 +616,10 @@ export function calculatePortfolio(
       0,
     );
     const accountCash = cashByAccount.get(account.id) ?? 0;
-    const accountAssets = accountSecuritiesValue + accountCash;
+    const accountPendingSubscriptions =
+      pendingSubscriptionsByAccount.get(account.id) ?? 0;
+    const accountAssets =
+      accountSecuritiesValue + accountCash + accountPendingSubscriptions;
     const net = contributionByAccount.get(account.id) ?? 0;
     const accountCashFlows = orderedLedger
       .filter((entry) => entry.account_id === account.id)
@@ -575,6 +638,7 @@ export function calculatePortfolio(
       assets: accountAssets,
       securitiesValue: accountSecuritiesValue,
       cash: accountCash,
+      pendingSubscriptions: accountPendingSubscriptions,
       contributions: net,
       profit: accountAssets - net,
       returnRate: calculateXirr(
@@ -697,6 +761,7 @@ export function calculatePortfolio(
       totalAssets,
       securitiesValue,
       cash,
+      pendingSubscriptions,
       holdingCost,
       deposits,
       withdrawals,
