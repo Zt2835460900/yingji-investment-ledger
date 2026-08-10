@@ -410,13 +410,14 @@ function accountingPrice(
   price: number,
   date = "2026-07-18",
   instrumentId = 1,
+  source = "TEST",
 ): PriceRow {
   return {
     id,
     instrument_id: instrumentId,
     price_date: date,
     price_units: price * PRICE_SCALE,
-    source: "TEST",
+    source,
   };
 }
 
@@ -612,6 +613,30 @@ test("latest valuation-day profit does not become zero on later closed days", ()
 
   assert.equal(result.latestValuationDate, "2026-07-18");
   assert.equal(result.metrics.todayProfit, 200);
+});
+
+test("a later transaction NAV does not mask the latest published NAV", () => {
+  const result = calculatePortfolio(
+    [accountingAccount],
+    [accountingInstrument()],
+    [
+      accountingEntry(1, "BUY", {
+        date: "2026-08-09",
+        quantity: 100,
+        price: 2.2838,
+      }),
+    ],
+    [
+      accountingPrice(1, 2.3098, "2026-08-07", 1, "EASTMONEY"),
+      accountingPrice(2, 2.2838, "2026-08-09", 1, "TRADE"),
+    ],
+    [],
+    [],
+  );
+
+  assert.equal(result.holdings[0].price, 2.3098);
+  assert.equal(result.holdings[0].priceDate, "2026-08-07");
+  closeTo(result.holdings[0].marketValue, 230.98);
 });
 
 test("break-even progress includes buy fees for a losing holding", () => {

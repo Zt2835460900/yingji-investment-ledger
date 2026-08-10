@@ -106,6 +106,21 @@ export function calculatePortfolio(
   const orderedPrices = [...prices].sort((a, b) =>
     a.price_date.localeCompare(b.price_date),
   );
+  const priceRowsByInstrument = new Map<number, PriceRow[]>();
+  for (const price of orderedPrices)
+    priceRowsByInstrument.set(price.instrument_id, [
+      ...(priceRowsByInstrument.get(price.instrument_id) ?? []),
+      price,
+    ]);
+  // A transaction's confirmed NAV belongs to the cost record. It must not
+  // mask a published market/NAV observation merely because the transaction
+  // was entered with a later confirmation date (for example, on a weekend).
+  // Manual valuation rows remain eligible so users can still override a NAV.
+  const valuationPriceRows = new Map<number, PriceRow[]>();
+  for (const [instrumentId, rows] of priceRowsByInstrument) {
+    const observed = rows.filter((row) => row.source !== "TRADE");
+    valuationPriceRows.set(instrumentId, observed.length ? observed : rows);
+  }
   const orderedOverrides = [...positionOverrides].sort(
     (a, b) => a.as_of_date.localeCompare(b.as_of_date) || a.id - b.id,
   );
@@ -287,8 +302,9 @@ export function calculatePortfolio(
   }
 
   const latestPrice = new Map<number, PriceRow>();
-  for (const price of orderedPrices)
-    if (price.price_date <= today) latestPrice.set(price.instrument_id, price);
+  for (const [instrumentId, rows] of valuationPriceRows)
+    for (const price of rows)
+      if (price.price_date <= today) latestPrice.set(instrumentId, price);
 
   const holdings = [...positions.values()]
     .filter((item) => item.instrumentId > 0 && item.quantity > 0.0000001)
@@ -351,12 +367,6 @@ export function calculatePortfolio(
       ...(entriesByDate.get(entry.trade_date) ?? []),
       entry,
     ]);
-  const pricesByInstrument = new Map<number, PriceRow[]>();
-  for (const price of orderedPrices)
-    pricesByInstrument.set(price.instrument_id, [
-      ...(pricesByInstrument.get(price.instrument_id) ?? []),
-      price,
-    ]);
   const simCash = new Map<number, number>();
   const simQty = new Map<string, number>();
   const simCost = new Map<string, number>();
@@ -377,7 +387,7 @@ export function calculatePortfolio(
 
   for (const date of dateRange(firstDate, today)) {
     for (const instrument of instruments) {
-      const rows = pricesByInstrument.get(instrument.id) ?? [];
+      const rows = valuationPriceRows.get(instrument.id) ?? [];
       const price = rows.findLast((item) => item.price_date <= date);
       if (price) simPrices.set(instrument.id, price.price_units / PRICE_SCALE);
     }
@@ -669,7 +679,7 @@ export function calculatePortfolio(
     ? holdings.reduce((sum, holding) => {
         if (holding.priceDate !== latestValuationDate) return sum;
         const previousPrice = (
-          pricesByInstrument.get(holding.instrumentId) ?? []
+          valuationPriceRows.get(holding.instrumentId) ?? []
         )
           .filter((price) => price.price_date < latestValuationDate)
           .at(-1);
