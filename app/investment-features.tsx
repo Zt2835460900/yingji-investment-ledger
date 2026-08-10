@@ -1047,10 +1047,12 @@ function CompanyEarningsTracker({
   discovered,
   trackedFunds,
   totalAssets,
+  trackedUnrealizedProfit,
 }: {
   discovered: DiscoveredCompany[];
   trackedFunds: TrackedIndexFund[];
   totalAssets: number;
+  trackedUnrealizedProfit: number;
 }) {
   const [companies, setCompanies] = useState<TrackedCompany[]>([]);
   const [insights, setInsights] = useState<CompanyInsight[]>([]);
@@ -1277,6 +1279,19 @@ function CompanyEarningsTracker({
     .filter(Boolean)
     .sort()
     .at(-1);
+  const latestActualDailyProfit = indexInsights.reduce((sum, item) => {
+    if (
+      !latestCalibrationNavDate ||
+      item.latestNavDate !== latestCalibrationNavDate ||
+      item.latestActualReturnPercent === null
+    )
+      return sum;
+    const currentFundValue = totalAssets * (item.weightBps / 10_000);
+    const dailyFactor = 1 + item.latestActualReturnPercent / 100;
+    return dailyFactor > 0
+      ? sum + currentFundValue - currentFundValue / dailyFactor
+      : sum;
+  }, 0);
   const insightMap = new Map(
     insights.map((insight) => [`${insight.market}:${insight.symbol}`, insight]),
   );
@@ -1357,15 +1372,27 @@ function CompanyEarningsTracker({
           </small>
         </div>
         <div className={estimate.estimatedProfit >= 0 ? "up" : "down"}>
-          <span>估算当日盈亏</span>
+          <span>今日指数推算盈亏</span>
           <strong>
             {estimate.estimatedProfit >= 0 ? "+" : "-"}¥
             {money(Math.abs(estimate.estimatedProfit))}
           </strong>
           <small>
             原始 {signedMoney(rawIndexEstimate.estimatedProfit)} · 校准差额{" "}
-            {signedMoney(calibrationDeltaProfit)}
+            {signedMoney(calibrationDeltaProfit)} · 非累计盈利
           </small>
+        </div>
+        <div className={latestActualDailyProfit >= 0 ? "up" : "down"}>
+          <span>最新净值单日盈亏</span>
+          <strong>{signedMoney(latestActualDailyProfit)}</strong>
+          <small>
+            {latestCalibrationNavDate || "净值待发布"} · 按当前持仓折算，与今日预估同口径
+          </small>
+        </div>
+        <div className={trackedUnrealizedProfit >= 0 ? "up" : "down"}>
+          <span>当前基金累计持仓盈亏</span>
+          <strong>{signedMoney(trackedUnrealizedProfit)}</strong>
+          <small>这是你说的真实累计盈利，与单日预估分开显示</small>
         </div>
         <div>
           <span>已覆盖组合</span>
@@ -1737,7 +1764,11 @@ export function FundLookthrough({
     code: string;
     product_type: string;
   }>;
-  holdings: Array<{ instrumentId: number; marketValue: number }>;
+  holdings: Array<{
+    instrumentId: number;
+    marketValue: number;
+    unrealized: number;
+  }>;
   totalAssets: number;
 }) {
   const queryFunds = useMemo(
@@ -1764,6 +1795,10 @@ export function FundLookthrough({
         `${fund.code}:${Math.max(0, Math.floor((fund.value / Math.max(1, totalAssets)) * 10_000))}`,
     )
     .join("|");
+  const queryInstrumentIds = new Set(queryFunds.map((fund) => fund.id));
+  const trackedUnrealizedProfit = holdings
+    .filter((holding) => queryInstrumentIds.has(holding.instrumentId))
+    .reduce((sum, holding) => sum + holding.unrealized, 0);
   const [result, setResult] = useState<LookthroughResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1934,6 +1969,7 @@ export function FundLookthrough({
           ),
         }))}
         totalAssets={totalAssets}
+        trackedUnrealizedProfit={trackedUnrealizedProfit}
       />
     </>
   );
