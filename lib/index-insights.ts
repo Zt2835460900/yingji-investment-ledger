@@ -41,6 +41,7 @@ export interface IndexHistoryPoint {
 
 export interface FundIndexCalibration {
   calibrated: boolean;
+  source: "LIVE_HISTORY" | "LAST_VALID_HISTORY" | "RAW_INDEX";
   beta: number;
   alphaPercent: number;
   sampleSize: number;
@@ -311,6 +312,7 @@ export async function fetchFundDailyReturns(codeInput: string) {
 
 const fallbackCalibration = (): FundIndexCalibration => ({
   calibrated: false,
+  source: "RAW_INDEX",
   beta: 1,
   alphaPercent: 0,
   sampleSize: 0,
@@ -390,12 +392,42 @@ export function calibrateFundToIndex(
   if (!best || best.rSquared < 0.08) return fallbackCalibration();
   return {
     calibrated: true,
+    source: "LIVE_HISTORY",
     beta: best.beta,
     alphaPercent: best.alphaPercent,
     sampleSize: best.pairs.length,
     rSquared: best.rSquared,
     alignment: best.alignment,
   };
+}
+
+const LAST_VALID_FUND_CALIBRATIONS: Record<
+  string,
+  FundIndexCalibration | undefined
+> = {
+  "021000": {
+    calibrated: true,
+    source: "LAST_VALID_HISTORY",
+    beta: 1.0172823654663776,
+    alphaPercent: 0.004197625860329658,
+    sampleSize: 117,
+    rSquared: 0.915457877724748,
+    alignment: "SAME_DATE",
+  },
+  "017641": {
+    calibrated: true,
+    source: "LAST_VALID_HISTORY",
+    beta: 0.9370667671018301,
+    alphaPercent: -0.0006497800826360221,
+    sampleSize: 117,
+    rSquared: 0.9853357972159883,
+    alignment: "SAME_DATE",
+  },
+};
+
+export function lastValidFundCalibration(codeInput: string) {
+  const saved = LAST_VALID_FUND_CALIBRATIONS[codeInput.trim()];
+  return saved ? { ...saved } : fallbackCalibration();
 }
 
 export function applyFundIndexCalibration(

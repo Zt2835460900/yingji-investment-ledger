@@ -1399,7 +1399,7 @@ function CompanyEarningsTracker({
                 </strong>
                 <small>
                   {item.calibration.calibrated
-                    ? `β ${item.calibration.beta.toFixed(2)} · R² ${item.calibration.rSquared.toFixed(2)} · ${item.calibration.sampleSize} 个真实净值样本`
+                    ? `${item.calibration.source === "LAST_VALID_HISTORY" ? "最近有效校准 · " : "自动更新 · "}β ${item.calibration.beta.toFixed(2)} · R² ${item.calibration.rSquared.toFixed(2)} · ${item.calibration.sampleSize} 个真实净值样本`
                     : "真实净值样本不足，暂用指数原始涨跌"}
                 </small>
               </div>

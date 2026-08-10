@@ -4,6 +4,7 @@ import {
   fetchFundDailyReturns,
   fetchIndexHistory,
   fetchIndexQuote,
+  lastValidFundCalibration,
   resolveTrackedIndex,
   type TrackedIndexKey,
 } from "@/lib/index-insights";
@@ -98,14 +99,7 @@ export async function GET(request: Request) {
     const items = await Promise.all(
       identifiedFunds.map(async (fund) => {
         const data = indexData.get(fund.trackedIndex.key);
-        const fallback = {
-          calibrated: false,
-          beta: 1,
-          alphaPercent: 0,
-          sampleSize: 0,
-          rSquared: 0,
-          alignment: "SAME_DATE" as const,
-        };
+        const fallback = lastValidFundCalibration(fund.fundCode);
         let calibration = fallback;
         let latestNavDate = "";
         let latestActualReturnPercent: number | null = null;
@@ -115,7 +109,8 @@ export async function GET(request: Request) {
           latestNavDate = history.at(-1)?.date ?? "";
           latestActualReturnPercent =
             history.at(-1)?.dailyReturnPercent ?? null;
-          calibration = calibrateFundToIndex(history, data?.history ?? []);
+          const calculated = calibrateFundToIndex(history, data?.history ?? []);
+          calibration = calculated.calibrated ? calculated : fallback;
         } catch (error) {
           calibrationError =
             error instanceof Error ? error.message : "基金真实净值读取失败";

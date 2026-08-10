@@ -7,6 +7,7 @@ import {
   calculateIndexMoveEstimate,
   parseIndexHistoryPayload,
   parseFundDailyReturnPayload,
+  lastValidFundCalibration,
   parseIndexQuotePayload,
   resolveTrackedIndex,
 } from "../lib/index-insights";
@@ -109,10 +110,18 @@ test("automatically learns the fund tracking coefficient and publication lag", (
   const calibration = calibrateFundToIndex(fundPoints, indexPoints);
 
   assert.equal(calibration.calibrated, true);
+  assert.equal(calibration.source, "LIVE_HISTORY");
   assert.equal(calibration.alignment, "PREVIOUS_SESSION");
   assert.ok(Math.abs(calibration.beta - 0.82) < 1e-10);
   assert.ok(calibration.rSquared > 0.99);
   assert.ok(
     Math.abs(applyFundIndexCalibration(1.3, calibration) - 1.066) < 1e-10,
   );
+});
+
+test("uses the latest verified real-NAV calibration during provider outages", () => {
+  const calibration = lastValidFundCalibration("017641");
+  assert.equal(calibration.calibrated, true);
+  assert.equal(calibration.source, "LAST_VALID_HISTORY");
+  assert.ok(Math.abs(calibration.beta - 0.9370667671018301) < 1e-12);
 });
