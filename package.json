@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node --import tsx --test tests/calculations.test.ts tests/ledger-reconciliation.test.ts tests/fund-data.test.ts tests/investment-planning.test.ts tests/fund-holdings.test.ts tests/stock-data.test.ts tests/company-insights.test.ts tests/paper-trading.test.ts tests/account-renaming.test.ts tests/account-instrument-deletion.test.ts && node --test tests/auth-server.test.mjs",
+    "test": "node --import tsx --test tests/calculations.test.ts tests/ledger-reconciliation.test.ts tests/fund-data.test.ts tests/investment-planning.test.ts tests/fund-holdings.test.ts tests/stock-data.test.ts tests/company-insights.test.ts tests/index-insights.test.ts tests/paper-trading.test.ts tests/account-renaming.test.ts tests/account-instrument-deletion.test.ts && node --test tests/auth-server.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

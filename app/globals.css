@@ -6322,6 +6322,58 @@ td small {
   font-weight: 700;
 }
 
+.index-estimate-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.index-estimate-list article {
+  display: grid;
+  grid-template-columns: minmax(250px, 1.5fr) repeat(3, minmax(145px, 1fr));
+  align-items: center;
+  gap: 16px;
+  padding: 15px 18px;
+  border: 1px solid #dfe6f5;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #fff, #f6f8ff);
+}
+
+.index-estimate-list article > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.index-estimate-list span,
+.index-estimate-list small {
+  overflow: hidden;
+  color: #7b8699;
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.index-estimate-list strong {
+  color: #252d3e;
+  font-size: 15px;
+}
+
+.index-estimate-list strong.up {
+  color: #de4f5f;
+}
+
+.index-estimate-list strong.down {
+  color: #159b72;
+}
+
+.index-estimate-empty {
+  margin-bottom: 18px;
+  border: 1px dashed #dfe5f0;
+  border-radius: 14px;
+}
+
 .company-watch-list {
   overflow: hidden;
   border: 1px solid #e5e9f1;
@@ -6500,6 +6552,10 @@ td small {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .index-estimate-list article {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .company-watch-list article {
     grid-template-columns:
       minmax(190px, 1.3fr) repeat(2, minmax(145px, 1fr))
@@ -6524,6 +6580,11 @@ td small {
 
   .company-estimate-summary {
     grid-template-columns: 1fr;
+  }
+
+  .index-estimate-list article {
+    grid-template-columns: 1fr;
+    gap: 11px;
   }
 
   .company-watch-list {

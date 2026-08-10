@@ -39,10 +39,15 @@ import {
   type LongTermDcaProjection,
 } from "@/lib/investment-planning";
 import {
-  calculateHoldingMoveEstimate,
   type CompanyInsight,
   type CompanyMarket,
 } from "@/lib/company-insights";
+import {
+  calculateCalibratedFundEstimate,
+  type FundIndexCalibration,
+  type IndexQuote,
+  type TrackedIndexKey,
+} from "@/lib/index-insights";
 
 const money = (value: number, digits = 2) =>
   new Intl.NumberFormat("zh-CN", {
@@ -973,6 +978,28 @@ interface DiscoveredCompany {
   weightPercent: number;
 }
 
+interface TrackedIndexFund {
+  name: string;
+  code: string;
+  weightBps: number;
+}
+
+interface FundIndexInsight {
+  fundName: string;
+  fundCode: string;
+  weightBps: number;
+  key: TrackedIndexKey;
+  label: string;
+  symbol: string;
+  quote: IndexQuote | null;
+  rawIndexChangePercent: number | null;
+  adjustedChangePercent: number | null;
+  calibration: FundIndexCalibration;
+  latestNavDate: string;
+  latestActualReturnPercent: number | null;
+  error: string;
+}
+
 interface CompanyForm {
   symbol: string;
   name: string;
@@ -1015,15 +1042,21 @@ const daysUntil = (date: string | null) => {
 
 function CompanyEarningsTracker({
   discovered,
+  trackedFunds,
   totalAssets,
 }: {
   discovered: DiscoveredCompany[];
+  trackedFunds: TrackedIndexFund[];
   totalAssets: number;
 }) {
   const [companies, setCompanies] = useState<TrackedCompany[]>([]);
   const [insights, setInsights] = useState<CompanyInsight[]>([]);
   const [updatedAt, setUpdatedAt] = useState("");
+  const [indexInsights, setIndexInsights] = useState<FundIndexInsight[]>([]);
+  const [indexUpdatedAt, setIndexUpdatedAt] = useState("");
+  const [indexNotice, setIndexNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [indexLoading, setIndexLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<TrackedCompany | "new" | null>(null);
@@ -1033,6 +1066,9 @@ function CompanyEarningsTracker({
       (company) =>
         `${company.market}:${company.symbol}:${company.weightPercent.toFixed(2)}`,
     )
+    .join("|");
+  const trackedFundsKey = trackedFunds
+    .map((fund) => `${fund.code}:${fund.name}:${fund.weightBps}`)
     .join("|");
 
   const loadWatchlist = async () => {
@@ -1164,15 +1200,61 @@ function CompanyEarningsTracker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey]);
 
-  const quoteRows = insights.flatMap((insight) =>
-    insight.quote ? [insight.quote] : [],
-  );
-  const estimate = calculateHoldingMoveEstimate(
-    discovered.map((company) => ({
-      symbol: company.symbol,
-      weightPercent: company.weightPercent,
+  const loadIndexInsights = async () => {
+    if (!trackedFunds.length) {
+      setIndexInsights([]);
+      setIndexUpdatedAt("");
+      return;
+    }
+    setIndexLoading(true);
+    setError("");
+    try {
+      const names = trackedFunds.map((fund) => fund.name).join("|");
+      const codes = trackedFunds.map((fund) => fund.code).join(",");
+      const weights = trackedFunds.map((fund) => fund.weightBps).join(",");
+      const response = await fetch(
+        `/api/index-insights?names=${encodeURIComponent(names)}&codes=${encodeURIComponent(codes)}&weights=${encodeURIComponent(weights)}`,
+        { cache: "no-store" },
+      );
+      const payload = (await response.json()) as {
+        items?: FundIndexInsight[];
+        updatedAt?: string;
+        notice?: string;
+        error?: string;
+      };
+      if (!response.ok)
+        throw new Error(payload.error || "跟踪指数行情读取失败");
+      setIndexInsights(payload.items ?? []);
+      setIndexUpdatedAt(payload.updatedAt ?? new Date().toISOString());
+      setIndexNotice(payload.notice ?? "");
+    } catch (caught) {
+      setIndexInsights([]);
+      setError(caught instanceof Error ? caught.message : "指数估算读取失败");
+    } finally {
+      setIndexLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadIndexInsights(), 0);
+    const refresh = window.setInterval(
+      () => void loadIndexInsights(),
+      15 * 60 * 1000,
+    );
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(refresh);
+    };
+    // Fund identity, code and portfolio weight define the calibration request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackedFundsKey]);
+
+  const estimate = calculateCalibratedFundEstimate(
+    indexInsights.map((item) => ({
+      weightPercent: item.weightBps / 100,
+      estimatedChangePercent: item.adjustedChangePercent ?? 0,
+      available: item.adjustedChangePercent !== null,
     })),
-    quoteRows,
     totalAssets,
   );
   const insightMap = new Map(
@@ -1210,19 +1292,31 @@ function CompanyEarningsTracker({
       <div className="feature-panel-head">
         <div>
           <span className="feature-kicker">
-            <BellRing size={16} /> 底层公司雷达
+            <BellRing size={16} /> 指数估值与公司财报
           </span>
-          <h2>持仓涨幅预估与主要公司财报</h2>
-          <p>自动追踪基金披露的主要公司；可新增、编辑、暂停、恢复或删除。</p>
+          <h2>跟踪指数涨幅预估与主要公司财报</h2>
+          <p>
+            涨幅按基金跟踪指数计算并用真实净值自动校准；底层公司只用于财报提醒。
+          </p>
         </div>
         <div className="company-tracker-head-actions">
           <button
             className="secondary-button"
-            disabled={loading || !activeCompanies.length}
-            onClick={() => void loadInsights()}
+            disabled={
+              loading ||
+              indexLoading ||
+              (!activeCompanies.length && !trackedFunds.length)
+            }
+            onClick={() => {
+              void loadInsights();
+              void loadIndexInsights();
+            }}
           >
-            <RefreshCcw size={16} className={loading ? "spin" : ""} />
-            {loading ? "更新中" : "刷新数据"}
+            <RefreshCcw
+              size={16}
+              className={loading || indexLoading ? "spin" : ""}
+            />
+            {loading || indexLoading ? "更新中" : "刷新数据"}
           </button>
           <button className="primary-button" onClick={openNew}>
             <Plus size={16} /> 新增公司
@@ -1233,10 +1327,10 @@ function CompanyEarningsTracker({
       <div className="company-estimate-summary">
         <div className={estimate.estimatedRate >= 0 ? "up" : "down"}>
           <span>
-            <TrendingUp size={16} /> 底层持仓估算涨跌
+            <TrendingUp size={16} /> 指数校准后估算涨跌
           </span>
           <strong>{signedPercent(estimate.estimatedRate * 100)}</strong>
-          <small>折算组合估值贡献，不是基金最终净值</small>
+          <small>指数涨跌经真实基金净值回归修正</small>
         </div>
         <div className={estimate.estimatedProfit >= 0 ? "up" : "down"}>
           <span>估算当日盈亏</span>
@@ -1249,14 +1343,14 @@ function CompanyEarningsTracker({
         <div>
           <span>已覆盖组合</span>
           <strong>{estimate.coveredWeightPercent.toFixed(2)}%</strong>
-          <small>{estimate.matchedCompanies} 家底层公司有可用行情</small>
+          <small>{estimate.matchedIndices} 只持仓基金完成指数匹配</small>
         </div>
         <div>
           <span>30 天内财报</span>
           <strong>{upcomingCount} 家</strong>
           <small>
-            {updatedAt
-              ? `更新于 ${new Date(updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+            {updatedAt || indexUpdatedAt
+              ? `更新于 ${new Date(indexUpdatedAt || updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
               : "等待首次更新"}
           </small>
         </div>
@@ -1269,6 +1363,67 @@ function CompanyEarningsTracker({
         </div>
       )}
 
+      {indexInsights.length ? (
+        <div className="index-estimate-list">
+          {indexInsights.map((item) => (
+            <article key={`${item.fundCode}-${item.key}`}>
+              <div>
+                <strong>{item.label}</strong>
+                <span>
+                  {item.fundName} · {item.fundCode} · 组合
+                  {(item.weightBps / 100).toFixed(2)}%
+                </span>
+              </div>
+              <div>
+                <span>指数实时涨跌</span>
+                <strong
+                  className={
+                    (item.rawIndexChangePercent ?? 0) >= 0 ? "up" : "down"
+                  }
+                >
+                  {item.rawIndexChangePercent === null
+                    ? "待更新"
+                    : signedPercent(item.rawIndexChangePercent)}
+                </strong>
+              </div>
+              <div>
+                <span>自动修正后</span>
+                <strong
+                  className={
+                    (item.adjustedChangePercent ?? 0) >= 0 ? "up" : "down"
+                  }
+                >
+                  {item.adjustedChangePercent === null
+                    ? "待更新"
+                    : signedPercent(item.adjustedChangePercent)}
+                </strong>
+                <small>
+                  {item.calibration.calibrated
+                    ? `β ${item.calibration.beta.toFixed(2)} · R² ${item.calibration.rSquared.toFixed(2)} · ${item.calibration.sampleSize} 个真实净值样本`
+                    : "真实净值样本不足，暂用指数原始涨跌"}
+                </small>
+              </div>
+              <div>
+                <span>最新真实净值表现</span>
+                <strong>
+                  {item.latestActualReturnPercent === null
+                    ? "待发布"
+                    : signedPercent(item.latestActualReturnPercent)}
+                </strong>
+                <small>{item.latestNavDate || item.error || "等待同步"}</small>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="feature-empty compact index-estimate-empty">
+          <strong>
+            {indexLoading ? "正在识别并校准跟踪指数…" : "暂无可识别的跟踪指数"}
+          </strong>
+          <span>基金名称需要明确包含纳斯达克100、标普500等指数名称。</span>
+        </div>
+      )}
+
       {companies.length ? (
         <div className="company-watch-list">
           {companies.map((company) => {
@@ -1278,11 +1433,6 @@ function CompanyEarningsTracker({
             const quote = insight?.quote;
             const earnings = insight?.earnings;
             const reportDays = daysUntil(earnings?.upcomingDate ?? null);
-            const contribution =
-              quote && company.estimated_weight_bps > 0
-                ? (company.estimated_weight_bps / 100) *
-                  (quote.changePercent / 100)
-                : null;
             return (
               <article
                 key={company.id}
@@ -1303,7 +1453,7 @@ function CompanyEarningsTracker({
                   </div>
                 </div>
                 <div className="company-quote-cell">
-                  <span>最新涨跌</span>
+                  <span>公司行情（不计入估算）</span>
                   {company.status === "PAUSED" ? (
                     <strong>已暂停</strong>
                   ) : quote ? (
@@ -1313,11 +1463,7 @@ function CompanyEarningsTracker({
                       >
                         {signedPercent(quote.changePercent)}
                       </strong>
-                      <small>
-                        {contribution !== null
-                          ? `贡献 ${signedPercent(contribution, 3)}`
-                          : `现价 ${quote.price.toFixed(2)}`}
-                      </small>
+                      <small>现价 {quote.price.toFixed(2)}</small>
                     </>
                   ) : (
                     <>
@@ -1434,7 +1580,10 @@ function CompanyEarningsTracker({
       )}
 
       <p className="feature-disclaimer">
-        预估只覆盖公开披露且有行情的底层公司，未计入未披露持仓、汇率、现金、费用和跨市场时差；财报日期及预测数据以公司最终公告为准，不构成投资建议。
+        {indexNotice ||
+          "涨幅估算使用基金跟踪指数，并根据基金真实历史净值自动修正；个股行情不参与组合涨幅估算。"}
+        QDII
+        仍会受实时汇率、基金费用、估值时点和跟踪误差影响；财报日期以公司最终公告为准，不构成投资建议。
       </p>
 
       {editing && (
@@ -1741,6 +1890,14 @@ export function FundLookthrough({
       </section>
       <CompanyEarningsTracker
         discovered={discoveredCompanies}
+        trackedFunds={queryFunds.map((fund) => ({
+          name: fund.name,
+          code: fund.code,
+          weightBps: Math.max(
+            0,
+            Math.floor((fund.value / Math.max(1, totalAssets)) * 10_000),
+          ),
+        }))}
         totalAssets={totalAssets}
       />
     </>
