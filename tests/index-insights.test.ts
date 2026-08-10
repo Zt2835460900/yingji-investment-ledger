@@ -6,6 +6,7 @@ import {
   buildYahooIndexHistoryUrl,
   calibrateFundToIndex,
   calculateIndexMoveEstimate,
+  mergeFundDailyReturnPages,
   parseIndexHistoryPayload,
   parseYahooIndexHistoryPayload,
   parseFundDailyReturnPayload,
@@ -118,6 +119,23 @@ test("parses published fund NAV returns used for automatic correction", () => {
     { date: "2026-08-05", nav: 1.7156, dailyReturnPercent: -0.2 },
     { date: "2026-08-06", nav: 1.7132, dailyReturnPercent: -0.14 },
   ]);
+});
+
+test("combines paginated real NAV history for rolling forecast checks", () => {
+  const merged = mergeFundDailyReturnPages([
+    [
+      { date: "2026-08-07", nav: 2.3, dailyReturnPercent: 1.1 },
+      { date: "2026-08-06", nav: 2.2, dailyReturnPercent: -0.2 },
+    ],
+    [
+      { date: "2026-08-06", nav: 2.2, dailyReturnPercent: -0.2 },
+      { date: "2026-08-05", nav: 2.21, dailyReturnPercent: 0.4 },
+    ],
+  ]);
+  assert.deepEqual(
+    merged.map((point) => point.date),
+    ["2026-08-05", "2026-08-06", "2026-08-07"],
+  );
 });
 
 test("automatically learns the fund tracking coefficient and publication lag", () => {

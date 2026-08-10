@@ -335,7 +335,7 @@ export async function fetchIndexHistory(indexKey: TrackedIndexKey) {
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const points = parseIndexHistoryPayload(await response.json());
-          if (points.length < 20) throw new Error("指数历史行情不足");
+          if (points.length < 60) throw new Error("指数历史行情不足");
           return points;
         }),
         (async () => {
@@ -345,7 +345,7 @@ export async function fetchIndexHistory(indexKey: TrackedIndexKey) {
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const points = parseYahooIndexHistoryPayload(await response.json());
-          if (points.length < 20) throw new Error("指数历史行情不足");
+          if (points.length < 60) throw new Error("指数历史行情不足");
           return points;
         })(),
       ],
@@ -384,23 +384,45 @@ export function parseFundDailyReturnPayload(payload: unknown) {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+export function mergeFundDailyReturnPages(
+  pages: Array<Array<{ date: string; nav: number; dailyReturnPercent: number }>>,
+) {
+  const byDate = new Map<
+    string,
+    { date: string; nav: number; dailyReturnPercent: number }
+  >();
+  pages.flat().forEach((point) => byDate.set(point.date, point));
+  return [...byDate.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-120);
+}
+
 export async function fetchFundDailyReturns(codeInput: string) {
   const code = codeInput.trim();
   if (!/^\d{6}$/.test(code)) throw new Error("基金代码格式不正确");
-  const url = new URL("/f10/lsjz", EASTMONEY_FUND_API_ORIGIN);
-  url.searchParams.set("fundCode", code);
-  url.searchParams.set("pageIndex", "1");
-  url.searchParams.set("pageSize", "180");
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Yingji/1.0 personal-ledger",
-      Referer: "https://fundf10.eastmoney.com/",
-    },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!response.ok)
-    throw new Error(`基金真实净值暂不可用：HTTP ${response.status}`);
-  const points = parseFundDailyReturnPayload(await response.json());
+  const pageResults = await Promise.allSettled(
+    Array.from({ length: 6 }, async (_, pageOffset) => {
+      const url = new URL("/f10/lsjz", EASTMONEY_FUND_API_ORIGIN);
+      url.searchParams.set("fundCode", code);
+      url.searchParams.set("pageIndex", String(pageOffset + 1));
+      url.searchParams.set("pageSize", "20");
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Yingji/1.0 personal-ledger",
+          Referer: "https://fundf10.eastmoney.com/",
+        },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok)
+        throw new Error(`基金真实净值暂不可用：HTTP ${response.status}`);
+      return parseFundDailyReturnPayload(await response.json());
+    }),
+  );
+  const points = mergeFundDailyReturnPages(
+    pageResults.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    ),
+  );
   if (points.length < 20) throw new Error("基金真实净值样本不足");
   return points;
 }
