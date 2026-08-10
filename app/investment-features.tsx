@@ -1026,6 +1026,9 @@ const inferCompanyMarket = (symbol: string): CompanyMarket =>
 const signedPercent = (value: number, digits = 2) =>
   `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
 
+const signedMoney = (value: number) =>
+  `${value >= 0 ? "+" : "-"}¥${money(Math.abs(value))}`;
+
 const daysUntil = (date: string | null) => {
   if (!date) return null;
   const todayValue = new Date();
@@ -1257,6 +1260,23 @@ function CompanyEarningsTracker({
     })),
     totalAssets,
   );
+  const rawIndexEstimate = calculateCalibratedFundEstimate(
+    indexInsights.map((item) => ({
+      weightPercent: item.weightBps / 100,
+      estimatedChangePercent: item.rawIndexChangePercent ?? 0,
+      available: item.rawIndexChangePercent !== null,
+    })),
+    totalAssets,
+  );
+  const calibrationDeltaPercent =
+    (estimate.estimatedRate - rawIndexEstimate.estimatedRate) * 100;
+  const calibrationDeltaProfit =
+    estimate.estimatedProfit - rawIndexEstimate.estimatedProfit;
+  const latestCalibrationNavDate = indexInsights
+    .map((item) => item.latestNavDate)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
   const insightMap = new Map(
     insights.map((insight) => [`${insight.market}:${insight.symbol}`, insight]),
   );
@@ -1330,7 +1350,11 @@ function CompanyEarningsTracker({
             <TrendingUp size={16} /> 指数校准后估算涨跌
           </span>
           <strong>{signedPercent(estimate.estimatedRate * 100)}</strong>
-          <small>指数回归＋真实净值滚动误差反馈</small>
+          <small>
+            原始 {signedPercent(rawIndexEstimate.estimatedRate * 100)} → 校准后{" "}
+            {signedPercent(estimate.estimatedRate * 100)} · 总修正{" "}
+            {signedPercent(calibrationDeltaPercent)}个百分点
+          </small>
         </div>
         <div className={estimate.estimatedProfit >= 0 ? "up" : "down"}>
           <span>估算当日盈亏</span>
@@ -1338,12 +1362,18 @@ function CompanyEarningsTracker({
             {estimate.estimatedProfit >= 0 ? "+" : "-"}¥
             {money(Math.abs(estimate.estimatedProfit))}
           </strong>
-          <small>按当前总资产 ¥{money(totalAssets, 0)} 估算</small>
+          <small>
+            原始 {signedMoney(rawIndexEstimate.estimatedProfit)} · 校准差额{" "}
+            {signedMoney(calibrationDeltaProfit)}
+          </small>
         </div>
         <div>
           <span>已覆盖组合</span>
           <strong>{estimate.coveredWeightPercent.toFixed(2)}%</strong>
-          <small>{estimate.matchedIndices} 只持仓基金完成指数匹配</small>
+          <small>
+            {estimate.matchedIndices} 只基金 · 最新真实净值{" "}
+            {latestCalibrationNavDate || "待发布"}
+          </small>
         </div>
         <div>
           <span>30 天内财报</span>
