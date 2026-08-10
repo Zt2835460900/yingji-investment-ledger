@@ -960,7 +960,7 @@ async function loadPortfolio() {
       .all<PriceRow>(),
     d1
       .prepare(
-        "SELECT id, account_id, instrument_id, amount_units, frequency, execution_mode, manual_daily_cap_units, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
+        "SELECT id, account_id, instrument_id, amount_units, frequency, execution_mode, manual_daily_cap_units, target_years, day_of_month, next_date, status FROM recurring_plans ORDER BY id",
       )
       .all<PlanRow>(),
     d1
@@ -1029,6 +1029,12 @@ async function loadPortfolio() {
             daysNeeded: progress.daysNeeded,
             projectedCompletionDate: progress.projectedCompletionDate,
             canCompleteThisMonth: progress.canCompleteThisMonth,
+            targetYears: progress.targetYears,
+            cumulativeInvested: progress.cumulativeInvestedUnits / MONEY_SCALE,
+            goalTarget: progress.goalTargetUnits / MONEY_SCALE,
+            goalRemaining: progress.goalRemainingUnits / MONEY_SCALE,
+            goalCompletionDays: progress.goalCompletionDays,
+            goalCompletionDate: progress.goalCompletionDate,
             planWarning: progress.warning,
           }
         : plan;
@@ -1942,10 +1948,13 @@ export async function POST(request: Request) {
           ? "DAILY_LIMIT"
           : "MONTHLY_DATE";
       const manualDailyCapUnits = decimalToUnits(body.manualDailyCap);
+      const targetYears = Number(body.targetYears ?? 10);
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
       if (manualDailyCapUnits < 0) throw new Error("每日金额上限不能为负数");
+      if (!Number.isInteger(targetYears) || targetYears < 1 || targetYears > 30)
+        throw new Error("定投年数必须为 1 至 30 年的整数");
       const [account, instrument] = await Promise.all([
         d1
           .prepare("SELECT id FROM accounts WHERE id = ?")
@@ -1960,7 +1969,7 @@ export async function POST(request: Request) {
       if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       await d1
         .prepare(
-          "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, execution_mode, manual_daily_cap_units, day_of_month, next_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO recurring_plans (account_id, instrument_id, amount_units, execution_mode, manual_daily_cap_units, target_years, day_of_month, next_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           accountId,
@@ -1968,6 +1977,7 @@ export async function POST(request: Request) {
           amountUnits,
           executionMode,
           manualDailyCapUnits,
+          targetYears,
           Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
           isoDate(body.nextDate),
         )
@@ -1982,11 +1992,14 @@ export async function POST(request: Request) {
           ? "DAILY_LIMIT"
           : "MONTHLY_DATE";
       const manualDailyCapUnits = decimalToUnits(body.manualDailyCap);
+      const targetYears = Number(body.targetYears ?? 10);
       if (!Number.isInteger(planId)) throw new Error("定投计划不存在");
       if (!Number.isInteger(accountId) || !Number.isInteger(instrumentId))
         throw new Error("请选择投资账户和产品");
       if (amountUnits <= 0) throw new Error("定投金额必须大于 0");
       if (manualDailyCapUnits < 0) throw new Error("每日金额上限不能为负数");
+      if (!Number.isInteger(targetYears) || targetYears < 1 || targetYears > 30)
+        throw new Error("定投年数必须为 1 至 30 年的整数");
       const [account, instrument] = await Promise.all([
         d1
           .prepare("SELECT id FROM accounts WHERE id = ?")
@@ -2001,7 +2014,7 @@ export async function POST(request: Request) {
       if (!instrument) throw new Error("投资产品不存在，请先通过代码匹配产品");
       const updated = await d1
         .prepare(
-          "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, execution_mode = ?, manual_daily_cap_units = ?, day_of_month = ?, next_date = ? WHERE id = ?",
+          "UPDATE recurring_plans SET account_id = ?, instrument_id = ?, amount_units = ?, execution_mode = ?, manual_daily_cap_units = ?, target_years = ?, day_of_month = ?, next_date = ? WHERE id = ?",
         )
         .bind(
           accountId,
@@ -2009,6 +2022,7 @@ export async function POST(request: Request) {
           amountUnits,
           executionMode,
           manualDailyCapUnits,
+          targetYears,
           Math.min(28, Math.max(1, Number(body.dayOfMonth) || 1)),
           isoDate(body.nextDate),
           planId,

@@ -1,0 +1,1 @@
+ALTER TABLE `recurring_plans` ADD `target_years` integer DEFAULT 10 NOT NULL;

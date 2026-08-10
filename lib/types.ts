@@ -71,6 +71,7 @@ export interface PlanRow {
   frequency: string;
   execution_mode: string;
   manual_daily_cap_units: number;
+  target_years: number;
   day_of_month: number;
   next_date: string;
   status: string;

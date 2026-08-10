@@ -6,6 +6,7 @@ import {
 } from "../lib/fund-data";
 import {
   calculateBuyOnlyTopUp,
+  estimateHistoricalAnnualReturn,
   projectLongTermDca,
   simulateDcaVsLumpSum,
 } from "../lib/investment-planning";
@@ -248,6 +249,48 @@ test("DCA simulator can limit the history to trailing calendar months", () => {
   assert.equal(result.limitedByHistory, false);
 });
 
+test("DCA simulator deducts the configured purchase fee from shares", () => {
+  const result = simulateDcaVsLumpSum(
+    [
+      { date: "2025-01-02", nav: 1 },
+      { date: "2025-02-03", nav: 1 },
+    ],
+    { monthlyAmount: 100, purchaseFeeRate: 0.001 },
+  );
+
+  assert.equal(result.feesIncluded, true);
+  assert.equal(result.purchaseFeeRate, 0.001);
+  assert.equal(result.totalPurchaseFees, 0.2);
+  assert.ok(Math.abs(result.dca.shares - 199.8) < 1e-10);
+  assert.ok(Math.abs(result.dca.profit + 0.2) < 1e-10);
+});
+
+test("historical return estimate uses total-return NAV and exposes a range", () => {
+  const points = Array.from({ length: 49 }, (_, month) => {
+    const date = new Date(Date.UTC(2022, month, 1)).toISOString().slice(0, 10);
+    const totalReturnNav = Math.pow(1.08, month / 12);
+    return { date, nav: 1, totalReturnNav };
+  });
+  const estimate = estimateHistoricalAnnualReturn(points);
+
+  assert.ok(Math.abs(estimate.baseRate - 0.08) < 0.002);
+  assert.ok(estimate.conservativeRate < estimate.baseRate);
+  assert.ok(estimate.optimisticRate > estimate.baseRate);
+  assert.ok(estimate.historyYears >= 3.9);
+  assert.ok(estimate.cagrSamples >= 2);
+});
+
+test("historical return estimate rejects less than a year of history", () => {
+  assert.throws(
+    () =>
+      estimateHistoricalAnnualReturn([
+        { date: "2026-01-02", nav: 1 },
+        { date: "2026-06-02", nav: 1.1 },
+      ]),
+    /至少需要约 1 年/,
+  );
+});
+
 test("historical simulator exposes when a requested period predates inception", () => {
   const result = simulateDcaVsLumpSum(
     [
@@ -339,6 +382,21 @@ test("annual fee reduces the long-term projection growth factor", () => {
   assert.ok(Math.abs(withFee.netAnnualRate - 0.089) < 1e-12);
   assert.ok(withFee.finalValue < withoutFee.finalValue);
   assert.equal(withFee.principal, withoutFee.principal);
+});
+
+test("purchase fee reduces investable cash but keeps gross principal", () => {
+  const result = projectLongTermDca({
+    monthlyAmount: 100,
+    years: 1,
+    annualReturn: 0,
+    initialAmount: 1_000,
+    purchaseFeeRate: 0.001,
+  });
+
+  assert.equal(result.principal, 2_200);
+  assert.equal(result.totalPurchaseFees, 2.2);
+  assert.ok(Math.abs(result.finalValue - 2_197.8) < 1e-10);
+  assert.ok(Math.abs(result.profit + 2.2) < 1e-10);
 });
 
 test("long-term projection validates its boundaries", () => {
@@ -455,6 +513,10 @@ test("daily-limit plans keep custom monthly targets and use the smaller remainin
   );
   assert.equal(result[0].warning, "");
   assert.equal(result[1].warning, "MONTH_OVERFLOW");
+  assert.equal(result[0].cumulativeInvestedUnits, yuan(3_450));
+  assert.equal(result[0].goalTargetUnits, yuan(3_500 * 10 * 12));
+  assert.ok((result[0].goalCompletionDays ?? 0) > 3_000);
+  assert.ok(result[0].goalCompletionDate);
 });
 
 test("paused subscriptions never create a daily recommendation", () => {
@@ -482,4 +544,5 @@ test("paused subscriptions never create a daily recommendation", () => {
   );
   assert.equal(result.todayUnits, 0);
   assert.equal(result.warning, "PAUSED");
+  assert.ok((result.goalCompletionDays ?? 0) > 0);
 });

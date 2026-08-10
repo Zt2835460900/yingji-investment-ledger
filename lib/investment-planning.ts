@@ -183,12 +183,14 @@ export interface InvestmentSimulationOptions {
   months?: number;
   startDate?: string;
   endDate?: string;
+  purchaseFeeRate?: number;
 }
 
 export interface SimulatedPurchase {
   date: string;
   nav: number;
   amount: number;
+  purchaseFee: number;
   shares: number;
 }
 
@@ -211,7 +213,9 @@ export interface DcaComparisonResult {
   endDate: string;
   finalNav: number;
   executionCount: number;
-  feesIncluded: false;
+  feesIncluded: boolean;
+  purchaseFeeRate: number;
+  totalPurchaseFees: number;
   methodology: string;
   purchases: SimulatedPurchase[];
   curve: Array<{
@@ -241,6 +245,97 @@ function normalizedNavPoints(
   return [...byDate.entries()]
     .map(([date, nav]) => ({ date, nav }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export interface HistoricalReturnEstimate {
+  startDate: string;
+  endDate: string;
+  historyYears: number;
+  baseRate: number;
+  conservativeRate: number;
+  optimisticRate: number;
+  annualizedVolatility: number;
+  cagrSamples: number;
+  methodology: string;
+}
+
+const clamp = (value: number, minimum: number, maximum: number) =>
+  Math.min(maximum, Math.max(minimum, value));
+
+/**
+ * Estimate a deliberately conservative future-return range from the fund's
+ * total-return NAV. The median of available 1/3/5/10-year CAGRs is less
+ * sensitive to a single unusually strong start date than one full-period CAGR.
+ */
+export function estimateHistoricalAnnualReturn(
+  navPoints: Array<FundNavPoint & { totalReturnNav?: number }>,
+): HistoricalReturnEstimate {
+  const points = normalizedNavPoints(navPoints);
+  if (points.length < 2) throw new Error("历史净值数据不足");
+  const first = points[0];
+  const last = points.at(-1)!;
+  const historyDays =
+    (Date.parse(`${last.date}T00:00:00Z`) -
+      Date.parse(`${first.date}T00:00:00Z`)) /
+    86_400_000;
+  if (historyDays < 330) throw new Error("至少需要约 1 年历史净值才能估算");
+
+  const cagrs: number[] = [];
+  for (const years of [1, 3, 5, 10]) {
+    if (historyDays < years * 365.25 * 0.9) continue;
+    const targetTime =
+      Date.parse(`${last.date}T00:00:00Z`) - years * 365.25 * 86_400_000;
+    const start = points.find(
+      (point) => Date.parse(`${point.date}T00:00:00Z`) >= targetTime,
+    );
+    if (!start || start.date >= last.date) continue;
+    const elapsedDays =
+      (Date.parse(`${last.date}T00:00:00Z`) -
+        Date.parse(`${start.date}T00:00:00Z`)) /
+      86_400_000;
+    cagrs.push(Math.pow(last.nav / start.nav, 365.25 / elapsedDays) - 1);
+  }
+  if (!cagrs.length) throw new Error("历史净值跨度不足以估算年化收益");
+  const sortedCagrs = [...cagrs].sort((a, b) => a - b);
+  const middle = Math.floor(sortedCagrs.length / 2);
+  const medianCagr =
+    sortedCagrs.length % 2
+      ? sortedCagrs[middle]
+      : (sortedCagrs[middle - 1] + sortedCagrs[middle]) / 2;
+
+  const lastByMonth = new Map<string, { date: string; nav: number }>();
+  for (const point of points) lastByMonth.set(point.date.slice(0, 7), point);
+  const monthlyPoints = [...lastByMonth.values()].sort((a, b) =>
+    a.date.localeCompare(b.date),
+  );
+  const monthlyReturns = monthlyPoints
+    .slice(1)
+    .map((point, index) => point.nav / monthlyPoints[index].nav - 1)
+    .filter(Number.isFinite);
+  const average =
+    monthlyReturns.reduce((sum, value) => sum + value, 0) /
+    Math.max(1, monthlyReturns.length);
+  const variance =
+    monthlyReturns.reduce(
+      (sum, value) => sum + Math.pow(value - average, 2),
+      0,
+    ) / Math.max(1, monthlyReturns.length - 1);
+  const annualizedVolatility = Math.sqrt(variance) * Math.sqrt(12);
+  const baseRate = clamp(medianCagr, -0.25, 0.3);
+  const uncertainty = clamp(annualizedVolatility * 0.35, 0.025, 0.1);
+
+  return {
+    startDate: first.date,
+    endDate: last.date,
+    historyYears: historyDays / 365.25,
+    baseRate,
+    conservativeRate: clamp(baseRate - uncertainty, -0.4, 0.45),
+    optimisticRate: clamp(baseRate + uncertainty, -0.4, 0.45),
+    annualizedVolatility,
+    cagrSamples: cagrs.length,
+    methodology:
+      "基于含现金分红再投资的总回报净值，取可用 1/3/5/10 年年化收益中位数，并按历史月度波动率生成保守与乐观区间。",
+  };
 }
 
 function monthIndex(date: string) {
@@ -277,8 +372,9 @@ function strategyResult(
 
 /**
  * Compare investing once on the first available date with investing the same
- * total amount on the first available NAV of every month. Transaction fees,
- * taxes and subscription limits are deliberately excluded.
+ * total amount on the first available NAV of every month. A configured
+ * purchase fee is deducted from investable cash; redemption fees, taxes and
+ * subscription limits remain excluded.
  */
 export function simulateDcaVsLumpSum(
   navPoints: Array<FundNavPoint & { totalReturnNav?: number }>,
@@ -297,6 +393,14 @@ export function simulateDcaVsLumpSum(
       (!options.endDate || point.date <= options.endDate),
   );
   if (!points.length) throw new Error("所选期间没有可用净值");
+
+  const purchaseFeeRate = options.purchaseFeeRate ?? 0;
+  if (
+    !Number.isFinite(purchaseFeeRate) ||
+    purchaseFeeRate < 0 ||
+    purchaseFeeRate >= 1
+  )
+    throw new Error("申购费率必须在 0%（含）至 100%（不含）之间");
 
   const historyStartDate = points[0].date;
   const availableMonths = new Set(points.map((point) => point.date.slice(0, 7)))
@@ -325,7 +429,8 @@ export function simulateDcaVsLumpSum(
   const purchases = [...firstByMonth.values()].map((point) => ({
     ...point,
     amount,
-    shares: amount / point.nav,
+    purchaseFee: amount * purchaseFeeRate,
+    shares: (amount * (1 - purchaseFeeRate)) / point.nav,
   }));
   if (!purchases.length) throw new Error("所选期间没有可执行的定投日");
 
@@ -334,7 +439,7 @@ export function simulateDcaVsLumpSum(
     (sum, purchase) => sum + purchase.shares,
     0,
   );
-  const lumpSumShares = invested / purchases[0].nav;
+  const lumpSumShares = (invested * (1 - purchaseFeeRate)) / purchases[0].nav;
   const finalPoint = points.at(-1)!;
   const drawdownPoints = points.filter(
     (point) => point.date >= purchases[0].date,
@@ -367,9 +472,11 @@ export function simulateDcaVsLumpSum(
     endDate: finalPoint.date,
     finalNav: finalPoint.nav,
     executionCount: purchases.length,
-    feesIncluded: false,
+    feesIncluded: purchaseFeeRate > 0,
+    purchaseFeeRate,
+    totalPurchaseFees: invested * purchaseFeeRate,
     methodology:
-      "每月首个可用净值执行定投；一次性投入在首个执行日投入相同总本金；收益未计申购费、赎回费和税费；最大回撤按期间基金净值路径计算。",
+      "每月首个可用净值执行定投；一次性投入在首个执行日投入相同总本金；已按产品申购费率扣除可购份额，未计赎回费和税费；最大回撤按期间基金总回报净值路径计算。",
     purchases,
     curve,
     dca: strategyResult(invested, dcaShares, finalPoint.nav, maxDrawdown),
@@ -388,6 +495,7 @@ export interface LongTermDcaOptions {
   annualReturn: number;
   annualFeeRate?: number;
   initialAmount?: number;
+  purchaseFeeRate?: number;
 }
 
 export interface LongTermDcaYearPoint {
@@ -404,6 +512,8 @@ export interface LongTermDcaProjection {
   annualReturn: number;
   annualFeeRate: number;
   initialAmount: number;
+  purchaseFeeRate: number;
+  totalPurchaseFees: number;
   netAnnualRate: number;
   monthlyRate: number;
   principal: number;
@@ -447,6 +557,13 @@ export function projectLongTermDca(
   const initialAmount = options.initialAmount ?? 0;
   if (!Number.isFinite(initialAmount) || initialAmount < 0)
     throw new Error("初始投入不能为负数");
+  const purchaseFeeRate = options.purchaseFeeRate ?? 0;
+  if (
+    !Number.isFinite(purchaseFeeRate) ||
+    purchaseFeeRate < 0 ||
+    purchaseFeeRate >= 1
+  )
+    throw new Error("申购费率必须在 0%（含）至 100%（不含）之间");
 
   const monthlyAmount = moneyToCents(options.monthlyAmount) / 100;
   const roundedInitialAmount = moneyToCents(initialAmount) / 100;
@@ -455,12 +572,12 @@ export function projectLongTermDca(
   const monthlyGrowthFactor = Math.pow(annualGrowthFactor, 1 / 12);
   const monthlyRate = monthlyGrowthFactor - 1;
   let principal = roundedInitialAmount;
-  let assets = roundedInitialAmount;
+  let assets = roundedInitialAmount * (1 - purchaseFeeRate);
   const curve: LongTermDcaYearPoint[] = [];
 
   for (let month = 1; month <= options.years * 12; month += 1) {
     assets *= monthlyGrowthFactor;
-    assets += monthlyAmount;
+    assets += monthlyAmount * (1 - purchaseFeeRate);
     principal += monthlyAmount;
     if (month % 12 === 0) {
       const profit = assets - principal;
@@ -481,6 +598,8 @@ export function projectLongTermDca(
     annualReturn: options.annualReturn,
     annualFeeRate,
     initialAmount: roundedInitialAmount,
+    purchaseFeeRate,
+    totalPurchaseFees: principal * purchaseFeeRate,
     netAnnualRate,
     monthlyRate,
     principal,
@@ -488,7 +607,7 @@ export function projectLongTermDca(
     profit,
     returnRate: principal > 0 ? profit / principal : 0,
     methodology:
-      "按有效年化收益率折算月收益率，先计当月收益、再于月末投入；年度费率按年度增长因子扣除；结果为情景测算，不代表未来收益。",
+      "按有效年化收益率折算月收益率，先计当月收益、再于月末投入；每次投入先扣产品申购费，年度费率按年度增长因子扣除；结果为历史统计情景，不代表未来收益。",
     curve,
   };
 }

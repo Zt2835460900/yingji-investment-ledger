@@ -5,6 +5,7 @@ export interface DailyPlanDefinition {
   amount_units: number;
   execution_mode: string;
   manual_daily_cap_units: number;
+  target_years?: number;
   status: string;
 }
 
@@ -33,6 +34,12 @@ export interface DailyPlanProgress {
   daysNeeded: number;
   projectedCompletionDate: string | null;
   canCompleteThisMonth: boolean;
+  targetYears: number;
+  cumulativeInvestedUnits: number;
+  goalTargetUnits: number;
+  goalRemainingUnits: number;
+  goalCompletionDays: number | null;
+  goalCompletionDate: string | null;
   warning: "PAUSED" | "NO_CAP" | "MONTH_OVERFLOW" | "DONE" | "";
 }
 
@@ -62,15 +69,19 @@ export function calculateDailyPlanProgress(
     ) + 1;
 
   return plans.map((plan) => {
-    const investedUnits = ledger
-      .filter(
-        (entry) =>
-          entry.kind === "BUY" &&
-          entry.trade_date.startsWith(month) &&
-          entry.account_id === plan.account_id &&
-          entry.instrument_id === plan.instrument_id,
-      )
+    const matchingPurchases = ledger.filter(
+      (entry) =>
+        entry.kind === "BUY" &&
+        entry.account_id === plan.account_id &&
+        entry.instrument_id === plan.instrument_id,
+    );
+    const investedUnits = matchingPurchases
+      .filter((entry) => entry.trade_date.startsWith(month))
       .reduce((sum, entry) => sum + entry.gross_amount_units, 0);
+    const cumulativeInvestedUnits = matchingPurchases.reduce(
+      (sum, entry) => sum + entry.gross_amount_units,
+      0,
+    );
     const remainingUnits = Math.max(0, plan.amount_units - investedUnits);
     const limit = limits.find(
       (item) => item.instrument_id === plan.instrument_id,
@@ -98,6 +109,29 @@ export function calculateDailyPlanProgress(
       remainingUnits === 0 ||
       (dailyCapUnits > 0 &&
         remainingUnits <= dailyCapUnits * daysRemainingThisMonth);
+    const targetYears = Math.min(30, Math.max(1, plan.target_years || 10));
+    const goalTargetUnits = plan.amount_units * targetYears * 12;
+    const goalRemainingUnits = Math.max(
+      0,
+      goalTargetUnits - cumulativeInvestedUnits,
+    );
+    const averageCalendarDaysPerMonth = 365.25 / 12;
+    const effectiveMonthlyUnits = isDaily
+      ? Math.min(plan.amount_units, dailyCapUnits * averageCalendarDaysPerMonth)
+      : plan.amount_units;
+    const goalCompletionDays =
+      goalRemainingUnits === 0
+        ? 0
+        : effectiveMonthlyUnits > 0
+          ? Math.ceil(
+              (goalRemainingUnits / effectiveMonthlyUnits) *
+                averageCalendarDaysPerMonth,
+            )
+          : null;
+    const goalCompletionDate =
+      goalCompletionDays === null
+        ? null
+        : addCalendarDays(today, Math.max(0, goalCompletionDays - 1));
     const warning: DailyPlanProgress["warning"] =
       remainingUnits === 0
         ? "DONE"
@@ -120,6 +154,12 @@ export function calculateDailyPlanProgress(
       daysNeeded,
       projectedCompletionDate,
       canCompleteThisMonth,
+      targetYears,
+      cumulativeInvestedUnits,
+      goalTargetUnits,
+      goalRemainingUnits,
+      goalCompletionDays,
+      goalCompletionDate,
       warning,
     };
   });

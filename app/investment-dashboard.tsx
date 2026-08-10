@@ -223,6 +223,7 @@ interface PortfolioData {
     amount: number;
     execution_mode: string;
     manual_daily_cap_units: number;
+    target_years: number;
     day_of_month: number;
     next_date: string;
     status: string;
@@ -234,6 +235,12 @@ interface PortfolioData {
     daysNeeded?: number;
     projectedCompletionDate?: string | null;
     canCompleteThisMonth?: boolean;
+    targetYears?: number;
+    cumulativeInvested?: number;
+    goalTarget?: number;
+    goalRemaining?: number;
+    goalCompletionDays?: number | null;
+    goalCompletionDate?: string | null;
     planWarning?: "PAUSED" | "NO_CAP" | "MONTH_OVERFLOW" | "DONE" | "";
   }>;
   targets: Array<{
@@ -2152,6 +2159,14 @@ function Plans({
     (sum, plan) => sum + (plan.todayAmount ?? 0),
     0,
   );
+  const cumulativeInvested = data.plans.reduce(
+    (sum, plan) => sum + (plan.cumulativeInvested ?? 0),
+    0,
+  );
+  const goalTarget = data.plans.reduce(
+    (sum, plan) => sum + (plan.goalTarget ?? 0),
+    0,
+  );
   return (
     <div className="stack-page">
       <section className="plan-summary">
@@ -2164,17 +2179,26 @@ function Plans({
         </div>
         <div>
           <span>
-            <Check size={16} /> 本月已记账
+            <Check size={16} /> 累计定投金额
           </span>
-          <strong>¥ {money(investedThisMonth, 0)}</strong>
-          <p>按真实买入流水自动累计</p>
+          <strong>¥ {money(cumulativeInvested, 0)}</strong>
+          <p>按账户和产品的真实买入流水累计</p>
         </div>
         <div>
           <span>
-            <CalendarDays size={16} /> 今日建议投入
+            <CalendarDays size={16} /> 定投年数金额总额
           </span>
-          <strong>¥ {money(todayAmount, 0)}</strong>
-          <p>按各项目剩余目标和每日上限计算</p>
+          <strong>¥ {money(goalTarget, 0)}</strong>
+          <p>各计划“月目标 × 12 × 年数”合计</p>
+        </div>
+        <div>
+          <span>
+            <CalendarDays size={16} /> 本月 / 今日
+          </span>
+          <strong>
+            ¥ {money(investedThisMonth, 0)} / ¥ {money(todayAmount, 0)}
+          </strong>
+          <p>本月已记账 / 今日按限额建议投入</p>
         </div>
         <button className="primary-button light" onClick={onPlan}>
           <Plus size={17} />
@@ -2191,6 +2215,15 @@ function Plans({
           const target = plan.monthlyTarget ?? plan.amount;
           const invested = plan.investedThisMonth ?? 0;
           const remaining = plan.remainingThisMonth ?? target;
+          const goalTarget =
+            plan.goalTarget ?? target * (plan.targetYears ?? 10) * 12;
+          const cumulativeInvested = plan.cumulativeInvested ?? 0;
+          const goalRemaining =
+            plan.goalRemaining ?? Math.max(0, goalTarget - cumulativeInvested);
+          const longTermProgress =
+            goalTarget > 0
+              ? Math.min(100, (cumulativeInvested / goalTarget) * 100)
+              : 0;
           const progress =
             target > 0 ? Math.min(100, (invested / target) * 100) : 0;
           const dailyNote =
@@ -2245,6 +2278,26 @@ function Plans({
                   <small>/ 月</small>
                 </div>
               </div>
+              <div className="plan-goal-stats">
+                <div>
+                  <span>定投年数</span>
+                  <strong>
+                    {plan.targetYears ?? plan.target_years ?? 10} 年
+                  </strong>
+                </div>
+                <div>
+                  <span>计划总额</span>
+                  <strong>¥{money(goalTarget, 0)}</strong>
+                </div>
+                <div>
+                  <span>累计已投</span>
+                  <strong>¥{money(cumulativeInvested, 0)}</strong>
+                </div>
+                <div>
+                  <span>长期剩余</span>
+                  <strong>¥{money(goalRemaining, 0)}</strong>
+                </div>
+              </div>
               {dailyMode ? (
                 <div className="plan-date daily-plan-stats">
                   <div>
@@ -2289,6 +2342,24 @@ function Plans({
                   {dailyMode
                     ? `${dailyNote} · 月度目标完成 ${progress.toFixed(0)}%`
                     : "到期后生成待确认任务，不会伪造成交"}
+                </small>
+              </div>
+              <div className="plan-progress long-term-plan-progress">
+                <div>
+                  <span
+                    style={{
+                      width: `${longTermProgress}%`,
+                      background: accent,
+                    }}
+                  />
+                </div>
+                <small>
+                  长期目标完成 {longTermProgress.toFixed(1)}% ·{" "}
+                  {plan.goalCompletionDays === 0
+                    ? "目标已完成"
+                    : plan.goalCompletionDays == null
+                      ? "缺少有效限额，暂不能计算完成天数"
+                      : `${plan.status === "ACTIVE" ? "按当前月目标和每日限额" : "恢复后按当前节奏"}预计还需 ${plan.goalCompletionDays} 天，约 ${plan.goalCompletionDate} 完成`}
                 </small>
               </div>
               <div className="plan-actions">
@@ -3783,6 +3854,7 @@ function ModalForm({
     dayOfMonth: String(editingPlan?.day_of_month ?? 5),
     executionMode: editingPlan?.execution_mode ?? "DAILY_LIMIT",
     manualDailyCap: String((editingPlan?.manual_daily_cap_units ?? 0) / 10_000),
+    targetYears: String(editingPlan?.target_years ?? 10),
     amount: editingEntry
       ? String(editingEntry.gross_amount_units / 10_000)
       : editingPlan
@@ -5299,6 +5371,19 @@ function ModalForm({
                   onChange={(e) => set("amount", e.target.value)}
                 />
                 <small>每个项目独立填写，页面会自动合计全部月度目标</small>
+              </Field>
+              <Field label="计划定投年数">
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  inputMode="numeric"
+                  value={form.targetYears}
+                  onChange={(e) => set("targetYears", e.target.value)}
+                />
+                <small>计划总额 = 月度目标 × 12 × 年数，可随时编辑</small>
               </Field>
               <Field label="执行方式">
                 <select

@@ -78,6 +78,13 @@
       "when": 1786245269093,
       "tag": "0010_chief_gauntlet",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1786330679053,
+      "tag": "0011_smart_sauron",
+      "breakpoints": true
     }
   ]
 }

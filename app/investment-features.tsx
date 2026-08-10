@@ -31,9 +31,11 @@ import {
 } from "recharts";
 import {
   calculateBuyOnlyTopUp,
+  estimateHistoricalAnnualReturn,
   projectLongTermDca,
   simulateDcaVsLumpSum,
   type DcaComparisonResult,
+  type HistoricalReturnEstimate,
   type LongTermDcaProjection,
 } from "@/lib/investment-planning";
 import {
@@ -1750,6 +1752,9 @@ interface SimulatorInstrument {
   name: string;
   code: string;
   product_type: string;
+  buy_fee_bps: number;
+  buy_discount_bps: number;
+  eastmoney_fee_bps: number;
 }
 
 type SimulatorMode = "history" | "projection";
@@ -1801,9 +1806,17 @@ export function DcaSimulator({
   const [projectionYears, setProjectionYears] = useState("10");
   const [annualReturn, setAnnualReturn] = useState("8");
   const [initialAmount, setInitialAmount] = useState("0");
+  const [returnEstimate, setReturnEstimate] =
+    useState<HistoricalReturnEstimate | null>(null);
   const selected =
     eligible.find((instrument) => String(instrument.id) === instrumentId) ??
     eligible[0];
+  const purchaseFeeBps = selected
+    ? selected.eastmoney_fee_bps > 0
+      ? selected.eastmoney_fee_bps
+      : (selected.buy_fee_bps * selected.buy_discount_bps) / 10_000
+    : 0;
+  const purchaseFeeRate = purchaseFeeBps / 10_000;
 
   const clearHistoricalResult = () => {
     setResult(null);
@@ -1840,6 +1853,7 @@ export function DcaSimulator({
       );
       const simulation = simulateDcaVsLumpSum(history.points, {
         monthlyAmount: Number(monthlyAmount),
+        purchaseFeeRate,
         ...(historyPeriod === "custom"
           ? {
               startDate: customStartDate || undefined,
@@ -1848,6 +1862,13 @@ export function DcaSimulator({
           : { months: Number(historyPeriod) }),
       });
       setResult(simulation);
+      try {
+        const estimate = estimateHistoricalAnnualReturn(history.points);
+        setReturnEstimate(estimate);
+        setAnnualReturn((estimate.baseRate * 100).toFixed(2));
+      } catch {
+        setReturnEstimate(null);
+      }
       setHistoryDataset({
         earliestDate: orderedPoints[0].date,
         latestDate: history.latestDate ?? orderedPoints.at(-1)?.date ?? "",
@@ -1866,37 +1887,103 @@ export function DcaSimulator({
     }
   };
 
+  const runReturnEstimate = async (instrument = selected) => {
+    if (!instrument) {
+      setError("暂无可读取历史净值的基金产品");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(
+        `/api/fund-history?code=${instrument.code}`,
+        {
+          cache: "no-store",
+        },
+      );
+      const history = (await response.json()) as {
+        error?: string;
+        points?: Array<{
+          date: string;
+          nav: number;
+          totalReturnNav?: number;
+        }>;
+      };
+      if (!response.ok || !history.points?.length)
+        throw new Error(history.error || "历史净值读取失败");
+      const estimate = estimateHistoricalAnnualReturn(history.points);
+      setReturnEstimate(estimate);
+      setAnnualReturn((estimate.baseRate * 100).toFixed(2));
+    } catch (caught) {
+      setReturnEstimate(null);
+      setError(
+        caught instanceof Error ? caught.message : "真实历史收益估算失败",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const projectionCalculation = useMemo<{
     result: LongTermDcaProjection | null;
+    conservative: LongTermDcaProjection | null;
+    optimistic: LongTermDcaProjection | null;
     error: string;
   }>(() => {
     try {
+      const options = {
+        monthlyAmount: Number(monthlyAmount),
+        years: Number(projectionYears),
+        initialAmount: Number(initialAmount || 0),
+        purchaseFeeRate,
+      };
       return {
         result: projectLongTermDca({
-          monthlyAmount: Number(monthlyAmount),
-          years: Number(projectionYears),
+          ...options,
           annualReturn: Number(annualReturn) / 100,
-          initialAmount: Number(initialAmount || 0),
         }),
+        conservative: returnEstimate
+          ? projectLongTermDca({
+              ...options,
+              annualReturn: returnEstimate.conservativeRate,
+            })
+          : null,
+        optimistic: returnEstimate
+          ? projectLongTermDca({
+              ...options,
+              annualReturn: returnEstimate.optimisticRate,
+            })
+          : null,
         error: "",
       };
     } catch (caught) {
       return {
         result: null,
+        conservative: null,
+        optimistic: null,
         error: caught instanceof Error ? caught.message : "测算参数不正确",
       };
     }
-  }, [annualReturn, initialAmount, monthlyAmount, projectionYears]);
+  }, [
+    annualReturn,
+    initialAmount,
+    monthlyAmount,
+    projectionYears,
+    purchaseFeeRate,
+    returnEstimate,
+  ]);
 
   const projection = projectionCalculation.result;
+  const conservativeProjection = projectionCalculation.conservative;
+  const optimisticProjection = projectionCalculation.optimistic;
   const projectionCurve = projection
     ? [
         {
           year: 0,
           principal: projection.initialAmount,
-          assets: projection.initialAmount,
-          profit: 0,
-          returnRate: 0,
+          assets: projection.initialAmount * (1 - projection.purchaseFeeRate),
+          profit: -projection.initialAmount * projection.purchaseFeeRate,
+          returnRate: -projection.purchaseFeeRate,
         },
         ...projection.curve,
       ]
@@ -1939,7 +2026,10 @@ export function DcaSimulator({
           role="tab"
           aria-selected={mode === "projection"}
           className={mode === "projection" ? "active" : ""}
-          onClick={() => setMode("projection")}
+          onClick={() => {
+            setMode("projection");
+            if (!returnEstimate) void runReturnEstimate();
+          }}
         >
           <strong>长期测算</strong>
           <span>持续投入 1–30 年</span>
@@ -1955,6 +2045,7 @@ export function DcaSimulator({
                 value={selected ? String(selected.id) : ""}
                 onChange={(event) => {
                   setInstrumentId(event.target.value);
+                  setReturnEstimate(null);
                   clearHistoricalResult();
                 }}
               >
@@ -2179,7 +2270,11 @@ export function DcaSimulator({
                   %
                 </span>
                 <span>现金分红按除息日再投资计入</span>
-                <span>未计申购费、赎回费与税费</span>
+                <span>
+                  已计产品申购费 {(result.purchaseFeeRate * 100).toFixed(3)}%
+                  （¥{money(result.totalPurchaseFees)}）
+                </span>
+                <span>未计赎回费与税费</span>
               </div>
               <p className="simulator-method">
                 使用公开日收益率构造含现金分红再投资的总回报路径；
@@ -2200,6 +2295,28 @@ export function DcaSimulator({
       ) : (
         <div className="simulator-workspace projection-workspace">
           <div className="projection-controls">
+            <label>
+              <span>基金产品</span>
+              <select
+                value={selected ? String(selected.id) : ""}
+                onChange={(event) => {
+                  const next = eligible.find(
+                    (instrument) =>
+                      String(instrument.id) === event.target.value,
+                  );
+                  setInstrumentId(event.target.value);
+                  setReturnEstimate(null);
+                  setError("");
+                  if (next) void runReturnEstimate(next);
+                }}
+              >
+                {eligible.map((instrument) => (
+                  <option key={instrument.id} value={instrument.id}>
+                    {instrument.name} · {instrument.code}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>每月持续投入</span>
               <div className="money-input">
@@ -2241,7 +2358,10 @@ export function DcaSimulator({
                   step="0.1"
                   inputMode="decimal"
                   value={annualReturn}
-                  onChange={(event) => setAnnualReturn(event.target.value)}
+                  onChange={(event) => {
+                    setAnnualReturn(event.target.value);
+                    setReturnEstimate(null);
+                  }}
                 />
                 <i>%</i>
               </div>
@@ -2273,6 +2393,15 @@ export function DcaSimulator({
                 {year} 年
               </button>
             ))}
+            <button
+              type="button"
+              className="projection-estimate-button"
+              disabled={loading || !selected}
+              onClick={() => void runReturnEstimate()}
+            >
+              <RefreshCcw size={14} className={loading ? "spin" : ""} />
+              {loading ? "正在读取真实净值…" : "用真实历史重新估算"}
+            </button>
           </div>
 
           {projectionCalculation.error && (
@@ -2288,7 +2417,9 @@ export function DcaSimulator({
                   </span>
                   <strong>预计资产 ¥{money(projection.finalValue)}</strong>
                   <small>
-                    在“每年 {annualReturn}%”这一固定情景下计算，不是收益承诺
+                    {returnEstimate
+                      ? `基于 ${returnEstimate.historyYears.toFixed(1)} 年总回报净值的多周期中位年化，不是收益承诺`
+                      : `按手动输入的每年 ${annualReturn}% 固定情景计算，不是收益承诺`}
                   </small>
                 </div>
                 <div className="projection-duration">
@@ -2303,7 +2434,8 @@ export function DcaSimulator({
                   <strong>¥{money(projection.principal)}</strong>
                   <small>
                     初始 ¥{money(projection.initialAmount)} + 月投 ¥
-                    {money(projection.monthlyAmount)}
+                    {money(projection.monthlyAmount)} · 申购费 ¥
+                    {money(projection.totalPurchaseFees)}
                   </small>
                 </article>
                 <article>
@@ -2322,6 +2454,50 @@ export function DcaSimulator({
                   </small>
                 </article>
               </div>
+
+              {returnEstimate &&
+                conservativeProjection &&
+                optimisticProjection && (
+                  <div className="projection-range" role="status">
+                    <div>
+                      <span>保守情景</span>
+                      <strong>
+                        {(returnEstimate.conservativeRate * 100).toFixed(2)}%
+                      </strong>
+                      <small>
+                        盈利 {conservativeProjection.profit >= 0 ? "+" : ""}¥
+                        {money(conservativeProjection.profit)}
+                      </small>
+                    </div>
+                    <div className="base">
+                      <span>历史基准</span>
+                      <strong>
+                        {(returnEstimate.baseRate * 100).toFixed(2)}%
+                      </strong>
+                      <small>
+                        盈利 {projection.profit >= 0 ? "+" : ""}¥
+                        {money(projection.profit)}
+                      </small>
+                    </div>
+                    <div>
+                      <span>乐观情景</span>
+                      <strong>
+                        {(returnEstimate.optimisticRate * 100).toFixed(2)}%
+                      </strong>
+                      <small>
+                        盈利 {optimisticProjection.profit >= 0 ? "+" : ""}¥
+                        {money(optimisticProjection.profit)}
+                      </small>
+                    </div>
+                    <p>
+                      数据期 {returnEstimate.startDate} 至{" "}
+                      {returnEstimate.endDate}
+                      ，年化波动率约{" "}
+                      {(returnEstimate.annualizedVolatility * 100).toFixed(1)}
+                      %。{returnEstimate.methodology}
+                    </p>
+                  </div>
+                )}
 
               <div className="simulator-chart-card">
                 <div className="simulator-chart-head">
@@ -2382,7 +2558,7 @@ export function DcaSimulator({
               <p className="simulator-method projection-notice">
                 <strong>情景测算，不是预测：</strong>
                 {projection.methodology}
-                实际基金净值会波动，且还会受到申购费、赎回费、税费、暂停交易和投入中断等因素影响。
+                总回报净值已反映基金运作费用和现金分红，模型另扣当前产品申购费；实际结果仍会受到赎回费、税费、暂停交易和投入中断等因素影响。
               </p>
             </div>
           )}
